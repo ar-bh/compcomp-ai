@@ -22,6 +22,7 @@ import {
 } from "../_shared/matching.ts";
 import {
   inferTimeLabel,
+  hasOnlyPastYears,
   isCompetitionUpcoming,
   isClosedScheduleText,
   isCompetitionResultsPage,
@@ -29,6 +30,10 @@ import {
   toCompetitionDbRow,
 } from "../_shared/dates.ts";
 import { ImageAllocator } from "../_shared/images.ts";
+import {
+  filterCompetitionsWithGemini,
+  filterSearchResultsWithGemini,
+} from "../_shared/gemini-filter.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -260,10 +265,15 @@ function isQuestionOrForumPage(result: SearchResult): boolean {
   if (/\bis there (a|any)\b/i.test(title)) return true;
   if (/\bhow (do|can|to)\b/i.test(title) && /\?/.test(title)) return true;
   if (/\bfind more competitions\b/i.test(combined)) return true;
+  if (/\bways to find\b/i.test(combined)) return true;
+  if (/\b(thread|discussion forum|asked on)\b/i.test(combined)) return true;
 
   try {
     const host = new URL(result.url).hostname.toLowerCase();
     if (host.includes("careervillage") || host.includes("quora") || host.includes("reddit")) {
+      return true;
+    }
+    if (host.includes("stackexchange") || host.includes("stackoverflow")) {
       return true;
     }
   } catch {
@@ -278,7 +288,11 @@ function isListOrDirectoryPage(result: SearchResult): boolean {
   const combined = `${result.title} ${result.snippet}`;
 
   if (/^\d+\s+[\w\s]{2,}\bcompetitions?\b/i.test(title)) return true;
+  if (/\b\d+\s+[\w\s]+\bcompetitions?\b/i.test(title) && !KNOWN_COMPETITION_SIGNALS.some((p) => p.test(combined))) {
+    return true;
+  }
   if (/\bcompetitions for\b/i.test(title)) return true;
+  if (/\blist of\b/i.test(combined) && /\bcompetitions?\b/i.test(combined)) return true;
   if (/\btypical dates\b/i.test(combined) && /\bwhat it'?s for\b/i.test(combined)) return true;
   if (/\bcompetition\b.*\btypical dates\b/i.test(combined)) return true;
 
@@ -293,6 +307,7 @@ function isRejectedResult(result: SearchResult): boolean {
   if (isListOrDirectoryPage(result)) return true;
 
   if (isResultsPageResult(result)) return true;
+  if (hasOnlyPastYears(combined)) return true;
   if (isClosedScheduleText(combined)) return true;
 
   if (LISTICLE_TITLE_PATTERNS.some((pattern) => pattern.test(combined))) {
@@ -381,9 +396,6 @@ function passesStrictCompetitionGate(result: SearchResult): boolean {
   return false;
 }
 
-  return false;
-}
-
 function passesRelaxedCompetitionGate(result: SearchResult): boolean {
   if (isRejectedResult(result)) return false;
 
@@ -444,81 +456,6 @@ function passesRelaxedCompetitionGate(result: SearchResult): boolean {
 
 function isOfficialCompetitionResult(result: SearchResult): boolean {
   return passesStrictCompetitionGate(result) || passesRelaxedCompetitionGate(result);
-}
-
-async function filterWithGemini(
-  results: SearchResult[],
-  apiKey: string,
-): Promise<{ results: SearchResult[]; applied: boolean; note: string }> {
-  if (!results.length) return { results: [], applied: false, note: "" };
-
-  const batch = results.slice(0, 25).filter((r) => !isRejectedResult(r));
-  if (!batch.length) return { results: [], applied: false, note: "" };
-
-  const numbered = batch
-    .map((r, i) => `${i}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet.slice(0, 140)}`)
-    .join("\n\n");
-
-  const prompt = `You filter search results for a high school competition finder app.
-
-KEEP (one index only if ALL are true):
-- A single named contest page (e.g. USACO registration, FIRST Robotics, Technovation)
-- Official org site with register/rules/eligibility for THAT contest
-
-REJECT (always reject these examples):
-- "26 Computer Science Competitions for California High Schools" (numbered list / directory)
-- "Is there a way to find more competitions? - Career Village" (Q&A / forum / advice)
-- Listicles, roundups, "competitions for high school" articles, blog posts
-- Career advice, Quora, Reddit, news, school announcements, results pages
-
-Results:
-${numbered}
-
-Reply with ONLY JSON: {"keep":[0,2,5]} using indices above. If none qualify: {"keep":[]}.`;
-
-  const ruleFallback = () =>
-    batch.filter((r) => passesStrictCompetitionGate(r));
-
-  try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0, maxOutputTokens: 256 },
-        }),
-      },
-    );
-
-    if (!response.ok) {
-      const errText = await response.text().catch(() => "");
-      return {
-        results: ruleFallback(),
-        applied: false,
-        note: `Gemini API error (${response.status}) — using strict rules.${errText ? " Check GEMINI_API_KEY." : ""}`,
-      };
-    }
-
-    const data = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      return { results: ruleFallback(), applied: false, note: "Gemini returned invalid JSON — using strict rules." };
-    }
-
-    const parsed = JSON.parse(jsonMatch[0]) as { keep?: number[] };
-    const keep = new Set((parsed.keep ?? []).filter((n) => Number.isInteger(n) && n >= 0 && n < batch.length));
-    const kept = batch.filter((_, index) => keep.has(index)).filter((r) => !isRejectedResult(r));
-    return { results: kept, applied: true, note: "" };
-  } catch (error) {
-    return {
-      results: ruleFallback(),
-      applied: false,
-      note: `Gemini failed — using strict rules. ${error instanceof Error ? error.message : ""}`.trim(),
-    };
-  }
 }
 
 function faviconForUrl(pageUrl: string): string {
@@ -796,18 +733,26 @@ async function discoverFromWeb(
   }
 
   let rankedResults = [...allSearchResults]
-    .filter((r) => !isRejectedResult(r))
-    .filter(isOfficialCompetitionResult)
-    .sort((a, b) => scoreSearchResult(b) - scoreSearchResult(a));
+    .filter((r) => !isRejectedResult(r));
 
   const geminiKey = Deno.env.get("GEMINI_API_KEY") ?? "";
   if (geminiKey && rankedResults.length) {
-    const gemini = await filterWithGemini(rankedResults, geminiKey);
-    rankedResults = gemini.results;
-    geminiFilterUsed = gemini.applied;
-    geminiNote = gemini.note;
-    if (gemini.note) errors.push(gemini.note);
+    const gemini = await filterSearchResultsWithGemini(rankedResults, geminiKey, userTopics);
+    if (gemini.applied) {
+      rankedResults = gemini.items.filter((r) => !isRejectedResult(r));
+      geminiFilterUsed = true;
+    } else {
+      if (gemini.note) {
+        geminiNote = gemini.note;
+        errors.push(gemini.note);
+      }
+      rankedResults = rankedResults.filter((r) => passesStrictCompetitionGate(r));
+    }
+  } else {
+    rankedResults = rankedResults.filter(isOfficialCompetitionResult);
   }
+
+  rankedResults = rankedResults.sort((a, b) => scoreSearchResult(b) - scoreSearchResult(a));
 
   const displayResults: Record<string, unknown>[] = [];
   const importedLinks = new Set<string>();
@@ -1086,11 +1031,29 @@ Deno.serve(async (req) => {
     const strictCount = combinedDb.filter((c) => !c._isAlternative).length;
     const alternativeCount = combinedDb.filter((c) => c._isAlternative).length;
 
-    const competitions = dedupeCompetitionResults(
+    let competitions = dedupeCompetitionResults(
       combinedDb
         .slice(0, MAX_RESULTS)
         .map((comp) => assignCompetitionImage(comp, imageAllocator)),
     ).filter((comp) => !isRejectedCompetitionRecord(comp, userTopics, inputs.otherText));
+
+    if (geminiKey && competitions.length) {
+      const finalGemini = await filterCompetitionsWithGemini(competitions, geminiKey, userTopics);
+      if (finalGemini.applied) {
+        competitions = finalGemini.items.filter(
+          (comp) => !isRejectedCompetitionRecord(comp, userTopics, inputs.otherText),
+        );
+        geminiFilterUsed = true;
+        geminiNote = finalGemini.note;
+      } else if (finalGemini.note) {
+        geminiNote = finalGemini.note;
+        competitions = competitions.filter(
+          (comp) =>
+            !isRejectedCompetitionRecord(comp, userTopics, inputs.otherText) &&
+            passesStrictCompetitionGate(competitionRecordToSearchResult(comp)),
+        );
+      }
+    }
 
     const dbCount = competitions.filter((c) => c._fromDatabase === true).length;
     const webCount = competitions.filter((c) => c._isNewWeb === true).length;
@@ -1126,11 +1089,11 @@ Deno.serve(async (req) => {
     }
 
     if (geminiFilterUsed) {
-      bannerParts.push("Gemini AI filtered web results.");
-    } else if (geminiKey && webSearchUsed) {
-      bannerParts.push("Gemini did not run successfully — using strict rule filters.");
-    } else if (webSearchUsed) {
-      bannerParts.push("Rule-based filters only — add GEMINI_API_KEY for smarter web filtering.");
+      bannerParts.push("Gemini AI verified results — listicles, threads, and outdated events removed.");
+    } else if (geminiKey) {
+      bannerParts.push("Gemini could not verify results — showing strict rule-filtered matches only.");
+    } else {
+      bannerParts.push("Add GEMINI_API_KEY to filter listicles, threads, and outdated competitions.");
     }
 
     if (geminiNote && !geminiFilterUsed) {

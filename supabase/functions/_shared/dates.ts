@@ -44,11 +44,39 @@ const OPEN_REGISTRATION_PATTERNS = [
 
 const ROLLING_CYCLE_PATTERNS = [
   /\byear[- ]round\b/i,
-  /\bannual\b/i,
-  /\bopen to\b/i,
-  /\beligibility\b/i,
-  /\b20(?:2[6-9]|[3-9]\d)\b/,
+  /\brolling registration\b/i,
+  /\bregister any time\b/i,
+  /\bmultiple contest dates\b/i,
 ];
+
+const ROLLING_ANNUAL_COMPETITIONS = [
+  /\busaco\b/i,
+  /\bmathcounts\b/i,
+  /\bscience olympiad\b/i,
+  /\bfirst robotics\b/i,
+  /\btechnovation\b/i,
+  /\bcyberpatriot\b/i,
+  /\bscience bowl\b/i,
+  /\bdeca\b/i,
+  /\bhosa\b/i,
+  /\bfbla\b/i,
+  /\bamc\b/i,
+  /\baime\b/i,
+];
+
+function isKnownRollingCompetition(text: string, now = new Date()): boolean {
+  if (isClosedScheduleText(text, now)) return false;
+  return ROLLING_ANNUAL_COMPETITIONS.some((pattern) => pattern.test(text));
+}
+
+export function hasOnlyPastYears(text: string, now = new Date()): boolean {
+  const years = [...String(text).matchAll(/\b(20\d{2})\b/g)].map((m) => Number(m[1]));
+  if (!years.length) return false;
+  const currentYear = now.getFullYear();
+  const hasFutureYear = years.some((y) => y >= currentYear);
+  const hasPastYear = years.some((y) => y < currentYear);
+  return hasPastYear && !hasFutureYear;
+}
 
 function startOfDay(date: Date): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -185,6 +213,10 @@ export function isClosedScheduleText(text: string, now = new Date()): boolean {
     return true;
   }
 
+  if (hasOnlyPastYears(scheduleText, now)) {
+    return true;
+  }
+
   const today = startOfDay(now);
   const closeDates = parseRegistrationCloseDates(scheduleText, now);
   if (closeDates.some((d) => startOfDay(d) < today)) {
@@ -221,9 +253,18 @@ export function isCompetitionUpcoming(
   now = new Date(),
 ): boolean {
   const scheduleText = getCompetitionScheduleText(comp);
-  if (!scheduleText.trim()) return true;
+  if (!scheduleText.trim()) {
+    return isKnownRollingCompetition(
+      `${getCompetitionField(comp, ["name", "title"])} ${getCompetitionField(comp, ["details", "description"])}`,
+      now,
+    );
+  }
 
   if (isClosedScheduleText(scheduleText, now)) {
+    return false;
+  }
+
+  if (hasOnlyPastYears(scheduleText, now)) {
     return false;
   }
 
@@ -234,13 +275,8 @@ export function isCompetitionUpcoming(
 
   if (allDates.length) {
     if (allDates.some((d) => startOfDay(d) >= today)) return true;
-    if (
-      OPEN_REGISTRATION_PATTERNS.some((pattern) => pattern.test(scheduleText)) ||
-      ROLLING_CYCLE_PATTERNS.some((pattern) => pattern.test(scheduleText))
-    ) {
-      return true;
-    }
-    return false;
+    return isKnownRollingCompetition(scheduleText, now) &&
+      OPEN_REGISTRATION_PATTERNS.some((pattern) => pattern.test(scheduleText));
   }
 
   const timeField = getCompetitionField(comp, ["time", "date", "deadline"]);
@@ -251,19 +287,16 @@ export function isCompetitionUpcoming(
     const timeExplicit = parseExplicitDates(timeField);
     if (timeExplicit.some((d) => startOfDay(d) >= today)) return true;
     if (timeExplicit.some((d) => startOfDay(d) < today)) {
-      return OPEN_REGISTRATION_PATTERNS.some((pattern) => pattern.test(scheduleText)) ||
-        ROLLING_CYCLE_PATTERNS.some((pattern) => pattern.test(scheduleText));
+      return isKnownRollingCompetition(scheduleText, now) &&
+        OPEN_REGISTRATION_PATTERNS.some((pattern) => pattern.test(scheduleText));
     }
   }
 
-  if (
-    OPEN_REGISTRATION_PATTERNS.some((pattern) => pattern.test(scheduleText)) ||
-    ROLLING_CYCLE_PATTERNS.some((pattern) => pattern.test(scheduleText))
-  ) {
-    return true;
+  if (OPEN_REGISTRATION_PATTERNS.some((pattern) => pattern.test(scheduleText))) {
+    return isKnownRollingCompetition(scheduleText, now);
   }
 
-  return true;
+  return isKnownRollingCompetition(scheduleText, now);
 }
 
 export function refreshCompetitionSchedule(
