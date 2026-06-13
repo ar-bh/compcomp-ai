@@ -35,6 +35,8 @@ const resultsBanner = document.getElementById("results-banner");
 const resultsStatus = document.getElementById("results-status");
 const resultsError = document.getElementById("results-error");
 const competitionsGrid = document.getElementById("competitions-grid");
+const suggestedSection = document.getElementById("competitions-suggested");
+const suggestedGrid = document.getElementById("competitions-suggested-grid");
 const editButton = document.getElementById("edit-form");
 const submitButton = form.querySelector(".get-started__submit");
 const defaultSubmitSlot = document.getElementById("default-submit-slot");
@@ -993,6 +995,7 @@ function renderCompetitionCard(competition) {
   const source = getCompetitionField(competition, ["source"]);
   const isNewWebResult = competition._isNewWeb === true;
   const isAlternative = competition._isAlternative === true;
+  const isSuggested = competition._isSuggested === true;
 
   return `
     <article class="comp-card${isNewWebResult ? " comp-card--web" : ""}">
@@ -1000,6 +1003,7 @@ function renderCompetitionCard(competition) {
       <header class="comp-card__header">${escapeHtml(name || "Competition")}</header>
       <div class="comp-card__meta">
         ${isNewWebResult ? `<span class="comp-card__tag comp-card__tag--source">Found online</span>` : ""}
+        ${isSuggested ? `<span class="comp-card__tag comp-card__tag--suggested">May not match</span>` : ""}
         ${isAlternative ? `<span class="comp-card__tag comp-card__tag--alt">Similar match</span>` : ""}
         ${displayTopic ? `<span class="comp-card__tag comp-card__tag--topic">${escapeHtml(displayTopic)}</span>` : ""}
         ${grade ? `<span class="comp-card__tag comp-card__tag--grade">${escapeHtml(formatGradeLabel(grade))}</span>` : ""}
@@ -1016,15 +1020,25 @@ function renderCompetitionCard(competition) {
 
 function renderCompetitions(competitions, topics = [], options = {}) {
   competitionsGrid.replaceChildren();
+  if (suggestedGrid) suggestedGrid.replaceChildren();
+  if (suggestedSection) suggestedSection.hidden = true;
   usedCardImages.clear();
   usedFaviconDomains.clear();
+
   const uniqueCompetitions = dedupeCompetitionResults(competitions);
   const capped = uniqueCompetitions.slice(0, DiscoveryMatching.MAX_RESULTS);
+  const suggestedCompetitions = dedupeCompetitionResults(options.suggestedCompetitions ?? []);
 
   if (!options.hasExactMatches) {
     competitionsGrid.innerHTML = `
       <p class="competitions-empty">No exact matches found. Try adjusting your grade, location, format, or topics.</p>
     `;
+    if (suggestedCompetitions.length && suggestedGrid && suggestedSection) {
+      suggestedSection.hidden = false;
+      suggestedGrid.innerHTML = suggestedCompetitions
+        .map((competition) => renderCompetitionCard(competition))
+        .join("");
+    }
     return;
   }
 
@@ -1032,10 +1046,7 @@ function renderCompetitions(competitions, topics = [], options = {}) {
     competitionsGrid.innerHTML = `
       <p class="competitions-empty">No exact matches found. Try adjusting your grade, location, format, or topics.</p>
     `;
-    return;
-  }
-
-  if (topics.length > 1) {
+  } else if (topics.length > 1) {
     competitionsGrid.innerHTML = topics
       .map((topic) => {
         const topicCompetitions = capped.filter((competition) =>
@@ -1061,12 +1072,18 @@ function renderCompetitions(competitions, topics = [], options = {}) {
         `;
       })
       .join("");
-    return;
+  } else {
+    competitionsGrid.innerHTML = capped
+      .map((competition) => renderCompetitionCard(competition))
+      .join("");
   }
 
-  competitionsGrid.innerHTML = capped
-    .map((competition) => renderCompetitionCard(competition))
-    .join("");
+  if (suggestedCompetitions.length && suggestedGrid && suggestedSection) {
+    suggestedSection.hidden = false;
+    suggestedGrid.innerHTML = suggestedCompetitions
+      .map((competition) => renderCompetitionCard(competition))
+      .join("");
+  }
 }
 
 function setResultsLoading(isLoading, message = "Finding competitions…") {
@@ -1082,6 +1099,8 @@ function resetResultsView() {
   resultsError.hidden = true;
   resultsError.textContent = "";
   competitionsGrid.innerHTML = "";
+  if (suggestedGrid) suggestedGrid.innerHTML = "";
+  if (suggestedSection) suggestedSection.hidden = true;
 }
 
 function showResultsView() {
@@ -1149,9 +1168,9 @@ form.addEventListener("submit", async (event) => {
 
     const {
       competitions: matchedCompetitions,
+      suggestedCompetitions = [],
       topics = inputs.selectedTopics.filter((t) => t !== "Other"),
       hasExactMatches = matchedCompetitions.length > 0,
-      isAlternativeResults = false,
       banner = "",
       inferredTopics = [],
     } = discovery;
@@ -1181,7 +1200,7 @@ form.addEventListener("submit", async (event) => {
 
     renderCompetitions(matchedCompetitions, topics, {
       hasExactMatches: matchedCompetitions.length > 0,
-      isAlternativeResults,
+      suggestedCompetitions,
     });
   } catch (error) {
     if (submitRequestId !== activeSubmitRequestId) {

@@ -597,6 +597,37 @@ body {
   color: rgba(255, 220, 170, 0.95);
 }
 
+.competitions-suggested {
+  margin-top: clamp(1.5rem, 3vh, 2.5rem);
+  padding-top: clamp(1rem, 2.5vh, 1.75rem);
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.competitions-suggested__title {
+  font-size: clamp(0.95rem, 2vh, 1.1rem);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: none;
+  color: rgba(255, 255, 255, 0.78);
+  margin-bottom: 0.35rem;
+}
+
+.competitions-suggested__note {
+  font-size: clamp(0.82rem, 1.8vh, 0.92rem);
+  color: rgba(255, 255, 255, 0.55);
+  margin-bottom: 1rem;
+}
+
+.competitions-grid--suggested .comp-card {
+  opacity: 0.92;
+}
+
+.comp-card__tag--suggested {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.72);
+}
+
 .comp-card {
   display: flex;
   flex-direction: column;

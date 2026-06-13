@@ -20,6 +20,8 @@ import {
   refreshWebRowMetadata,
   getMatchedTopicsForCompetition,
   topicExplicitlyConflictsWithSearch,
+  pickSuggestedCompetitions,
+  MAX_SUGGESTED_RESULTS,
 } from "../_shared/matching.ts";
 import {
   inferTimeLabel,
@@ -127,7 +129,7 @@ const TARGET_WEB_SLOTS = 3;
 const MAX_SERPER_QUERIES = 1;
 const MAX_SERPER_QUERIES_WHEN_EMPTY = 2;
 const MAX_WEB_PERSIST = 12;
-const SERPER_RESULTS_PER_QUERY = 8;
+const MAX_SUGGESTED_WEB = 8;
 
 interface SearchResult {
   title: string;
@@ -691,6 +693,7 @@ async function discoverFromWeb(
   maxDisplay: number,
 ): Promise<{
   imported: Record<string, unknown>[];
+  suggestedWeb: Record<string, unknown>[];
   newWebCount: number;
   searchHits: number;
   serperQueries: number;
@@ -700,7 +703,7 @@ async function discoverFromWeb(
 }> {
   if (maxDisplay <= 0) {
     return {
-      imported: [], newWebCount: 0, searchHits: 0, serperQueries: 0,
+      imported: [], suggestedWeb: [], newWebCount: 0, searchHits: 0, serperQueries: 0,
       geminiFilterUsed: false, geminiNote: "", errors: [],
     };
   }
@@ -757,6 +760,7 @@ async function discoverFromWeb(
     .sort((a, b) => scoreSearchResult(b) - scoreSearchResult(a));
 
   const displayResults: Record<string, unknown>[] = [];
+  const suggestedWeb: Record<string, unknown>[] = [];
   const importedLinks = new Set<string>();
   let persisted = 0;
   let newWebCount = 0;
@@ -822,8 +826,43 @@ async function discoverFromWeb(
     }
   }
 
+  const primaryUrls = new Set(
+    displayResults.map((c) => normalizeCompetitionLink(String(c.link ?? ""))).filter(Boolean),
+  );
+
+  for (const result of rankedResults) {
+    if (suggestedWeb.length >= MAX_SUGGESTED_WEB) break;
+
+    const normalizedUrl = normalizeCompetitionLink(result.url);
+    if (!normalizedUrl || primaryUrls.has(normalizedUrl) || importedLinks.has(normalizedUrl)) {
+      continue;
+    }
+    if (!isUsableSearchResult(result) || isRejectedResult(result)) continue;
+
+    const imageUrl = result.image && isSafeImageUrl(result.image, result.url)
+      ? result.image
+      : faviconForUrl(result.url);
+    const competition = buildCompetitionFromSearchResult(
+      result,
+      inputs,
+      userTopics,
+      imageUrl,
+      false,
+    );
+    if (!competition) continue;
+
+    suggestedWeb.push({
+      ...competition,
+      image: imageUrl || faviconForUrl(result.url),
+      _fromDatabase: false,
+      _isSuggested: true,
+      _isNewWeb: false,
+    });
+  }
+
   return {
     imported: displayResults,
+    suggestedWeb,
     newWebCount,
     searchHits: allSearchResults.length,
     serperQueries,
@@ -863,7 +902,9 @@ function pickWithProfileVariety(
   return picked;
 }
 
-function fillDatabaseResults(
+const SERPER_RESULTS_PER_QUERY = 8;
+
+function fillPrimaryDatabaseResults(
   pool: Record<string, unknown>[],
   inputs: FormInputs,
   limit: number,
@@ -874,20 +915,17 @@ function fillDatabaseResults(
   const seen = new Set<string>();
   const picked: Record<string, unknown>[] = [];
 
-  picked.push(
-    ...pickWithProfileVariety(pool, inputs, "strict", limit, seen, profileSeed, { isAlternative: false }),
-  );
-
-  if (picked.length < limit) {
+  for (const mode of ["strict", "relaxed", "fallback"] as const) {
+    if (picked.length >= limit) break;
     picked.push(
       ...pickWithProfileVariety(
         pool,
         inputs,
-        "relaxed",
+        mode,
         limit - picked.length,
         seen,
         profileSeed,
-        { isAlternative: true },
+        { isAlternative: false },
       ),
     );
   }
@@ -984,10 +1022,11 @@ Deno.serve(async (req) => {
     const serperKey = Deno.env.get("SERPER_API_KEY") ?? "";
     const geminiKey = Deno.env.get("GEMINI_API_KEY") ?? "";
     const dbSlotTarget = serperKey ? TARGET_DB_SLOTS : TARGET_RESULTS;
-    const dbResults = fillDatabaseResults(eligibleDb, inputs, dbSlotTarget);
+    const dbResults = fillPrimaryDatabaseResults(eligibleDb, inputs, dbSlotTarget);
 
     const imageAllocator = new ImageAllocator();
     let webResults: Record<string, unknown>[] = [];
+    let webSuggested: Record<string, unknown>[] = [];
     let searchHits = 0;
     let serperQueries = 0;
     let newWebCount = 0;
@@ -1008,6 +1047,7 @@ Deno.serve(async (req) => {
       webResults = webDiscovery.imported.filter(
         (comp) => !isRejectedCompetitionRecord(comp, userTopics, inputs.otherText),
       );
+      webSuggested = webDiscovery.suggestedWeb;
       searchHits = webDiscovery.searchHits;
       serperQueries = webDiscovery.serperQueries;
       newWebCount = webDiscovery.newWebCount;
@@ -1020,7 +1060,7 @@ Deno.serve(async (req) => {
     const seenIds = new Set(combinedDb.map((comp) => getCompetitionId(comp)));
 
     if (combinedDb.length < TARGET_RESULTS) {
-      const topUp = fillDatabaseResults(
+      const topUp = fillPrimaryDatabaseResults(
         eligibleDb.filter((c) => !seenIds.has(getCompetitionId(c))),
         inputs,
         TARGET_RESULTS - combinedDb.length,
@@ -1029,9 +1069,6 @@ Deno.serve(async (req) => {
       const dbPart = combinedDb.filter((c) => c._fromDatabase === true);
       combinedDb = mergeResultsWebFirst(webPart, [...dbPart, ...topUp], TARGET_RESULTS);
     }
-
-    const strictCount = combinedDb.filter((c) => !c._isAlternative).length;
-    const alternativeCount = combinedDb.filter((c) => c._isAlternative).length;
 
     let competitions = dedupeCompetitionResults(
       combinedDb
@@ -1066,11 +1103,50 @@ Deno.serve(async (req) => {
       }
     }
 
+    if (competitions.length < TARGET_RESULTS) {
+      const primaryIds = new Set(competitions.map((comp) => getCompetitionId(comp)));
+      const topUp = fillPrimaryDatabaseResults(
+        eligibleDb.filter((c) => !primaryIds.has(getCompetitionId(c))),
+        inputs,
+        TARGET_RESULTS - competitions.length,
+      );
+      competitions = dedupeCompetitionResults([
+        ...competitions,
+        ...topUp
+          .map((comp) => assignCompetitionImage(comp, imageAllocator))
+          .filter((comp) => !isRejectedCompetitionRecord(comp, userTopics, inputs.otherText)),
+      ]).slice(0, MAX_RESULTS);
+    }
+
+    const primaryIds = new Set(competitions.map((comp) => getCompetitionId(comp)));
+    const suggestedPool = allCompetitions
+      .map((c) => String(c.source ?? "manual") === "web" ? refreshWebRowMetadata(c) : c)
+      .map((c) => refreshCompetitionSchedule(c))
+      .filter((c) => !primaryIds.has(getCompetitionId(c)))
+      .filter((c) => !isCompetitionResultsPage(c) && isCompetitionUpcoming(c))
+      .filter((c) => !isRejectedResult(competitionRecordToSearchResult(c)));
+
+    let suggestedCompetitions = pickSuggestedCompetitions(
+      suggestedPool,
+      inputs,
+      primaryIds,
+      MAX_SUGGESTED_RESULTS,
+    );
+
+    const extraWebSuggested = webSuggested.filter(
+      (comp) => !primaryIds.has(getCompetitionId(comp)),
+    );
+    suggestedCompetitions = dedupeCompetitionResults([
+      ...suggestedCompetitions,
+      ...extraWebSuggested,
+    ])
+      .filter((comp) => !primaryIds.has(getCompetitionId(comp)))
+      .slice(0, MAX_SUGGESTED_RESULTS)
+      .map((comp) => assignCompetitionImage(comp, imageAllocator));
+
     const dbCount = competitions.filter((c) => c._fromDatabase === true).length;
     const webCount = competitions.filter((c) => c._isNewWeb === true).length;
-    const isAlternativeResults = alternativeCount > 0 && strictCount === 0
-      ? true
-      : competitions.some((c) => c._isAlternative === true);
+    const suggestedCount = suggestedCompetitions.length;
     const displayTopics = inputs.selectedTopics.filter((t) => t !== "Other").length
       ? inputs.selectedTopics.filter((t) => t !== "Other")
       : topics;
@@ -1078,13 +1154,13 @@ Deno.serve(async (req) => {
     const bannerParts: string[] = [];
 
     if (competitions.length) {
-      bannerParts.push(`Showing ${competitions.length} competition${competitions.length === 1 ? "" : "s"}.`);
+      bannerParts.push(`Showing ${competitions.length} top match${competitions.length === 1 ? "" : "es"}.`);
     }
 
-    if (isAlternativeResults && strictCount === 0) {
-      bannerParts.push("Showing related upcoming competitions for your topic — broaden grade or location for tighter matches.");
-    } else if (isAlternativeResults) {
-      bannerParts.push(`${alternativeCount} similar alternative${alternativeCount === 1 ? "" : "s"} included.`);
+    if (suggestedCount) {
+      bannerParts.push(
+        `${suggestedCount} more below may not match your search (from database & leftover web results, no extra credits).`,
+      );
     }
 
     if (!webSearchUsed) {
@@ -1116,7 +1192,7 @@ Deno.serve(async (req) => {
     }
 
     if (competitions.length < TARGET_RESULTS) {
-      bannerParts.push(`Only ${competitions.length} upcoming matches — try broadening location or topics.`);
+      bannerParts.push(`Only ${competitions.length} strong matches — see suggestions below for more options.`);
     }
 
     if (webErrors.length) {
@@ -1125,10 +1201,11 @@ Deno.serve(async (req) => {
 
     return jsonResponse({
       competitions,
+      suggestedCompetitions,
       topics: displayTopics,
       inferredTopics,
       hasExactMatches: competitions.length > 0,
-      isAlternativeResults,
+      suggestedCount,
       webSearchUsed,
       webImportCount: newWebCount,
       newWebCount,

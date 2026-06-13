@@ -1,5 +1,6 @@
 export const TARGET_RESULTS = 10;
 export const MAX_RESULTS = 10;
+export const MAX_SUGGESTED_RESULTS = 10;
 /** @deprecated use TARGET_RESULTS */
 export const MIN_RESULTS = TARGET_RESULTS;
 
@@ -886,6 +887,63 @@ export function dedupeCompetitionResults(
 export function selectTopCompetitions(scored: ScoredCompetition[]): Record<string, unknown>[] {
   const top = scored.slice(0, MAX_RESULTS).map((s) => s.competition);
   return top;
+}
+
+/** Rank leftovers for the "may not be what you're looking for" section (no topic match required). */
+export function pickSuggestedCompetitions(
+  pool: Record<string, unknown>[],
+  inputs: FormInputs,
+  excludeIds: Set<string>,
+  limit = MAX_SUGGESTED_RESULTS,
+): Record<string, unknown>[] {
+  const userTopics = getUserSearchTopics(inputs);
+  const searchTopics = inputs.selectedTopics.includes("Other")
+    ? [...userTopics, "Other"]
+    : userTopics;
+
+  const scored: { competition: Record<string, unknown>; score: number }[] = [];
+
+  for (const competition of pool) {
+    const id = getCompetitionId(competition);
+    if (excludeIds.has(id)) continue;
+
+    const matched = getMatchedTopicsForCompetition(competition, searchTopics, inputs.otherText);
+    const topicHits = matched.filter((t) => t !== "Other").length;
+    const canonical = getCanonicalTopicFromField(competition);
+    const onTopic = topicHits > 0 && !topicExplicitlyConflictsWithSearch(competition, userTopics);
+
+    let score = 0.35;
+    if (!onTopic) score += 0.25;
+    if (canonical && userTopics.some((t) => t !== "Other" && t !== canonical)) score += 0.15;
+    if (String(competition.source ?? "manual") === "manual") score += 0.1;
+    if (getCompetitionField(competition, ["time", "date", "deadline"])) score += 0.08;
+    if (inputs.location && locationMatchesUser(competition, inputs.location, inputs.format)) {
+      score += 0.12;
+    }
+
+    scored.push({
+      competition: {
+        ...competition,
+        _isSuggested: true,
+        _matchedTopics: matched.length ? matched : [getCompetitionField(competition, ["topic"]) || "General"],
+      },
+      score,
+    });
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+
+  const seen = new Set<string>();
+  const picked: Record<string, unknown>[] = [];
+  for (const item of scored) {
+    const id = getCompetitionId(item.competition);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    picked.push(item.competition);
+    if (picked.length >= limit) break;
+  }
+
+  return picked;
 }
 
 export function inferTopicFromText(text: string): string | null {
