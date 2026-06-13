@@ -24,14 +24,31 @@ const SKIP_DOMAINS = [
   "facebook.com", "twitter.com", "x.com", "instagram.com", "youtube.com",
   "linkedin.com", "reddit.com", "pinterest.com", "tiktok.com",
   "wikipedia.org", "amazon.com", "ebay.com",
+  "quora.com", "medium.com", "prepory.com", "thoughtco.com", "wikihow.com",
+  "answers.com", "yahoo.com", "buzzfeed.com", "student-tutor.com",
+  "collegexpress.com", "prepscholar.com", "niche.com", "usnews.com",
 ];
 
-const BLOCKED_PATH_PATTERNS = ["/news/", "/blog/", "/article/", "/jobs/", "/careers/"];
+const BLOCKED_PATH_PATTERNS = [
+  "/news/", "/blog/", "/article/", "/jobs/", "/careers/",
+  "/posts/", "/stories/", "/guides/", "/list/", "/roundup/",
+];
+
+const LISTICLE_TITLE_PATTERNS = [
+  /\b(top|best)\s+\d+\b/i,
+  /\d+\s+(best|top|great|greatest|must[- ]try|amazing)\b/i,
+  /\b(list of|roundup|ranked|ultimate guide|compared)\b/i,
+  /\bwhat are (some|the best)\b/i,
+  /\b(top|best)\s+\d+\s+\w+\s+compet/i,
+  /\bcompetitions for (high school|students)\b/i,
+  /\?\s*-\s*quora\b/i,
+];
 
 interface SearchResult {
   title: string;
   url: string;
   snippet: string;
+  image?: string;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -60,8 +77,10 @@ function parseInputs(body: Record<string, unknown>): FormInputs | null {
   };
 }
 
-function buildSearchQuery(inputs: FormInputs, topics: string[]): string {
-  const parts = ["student competition", "high school", "youth"];
+function buildSearchQuery(inputs: FormInputs, topics: string[], official = false): string {
+  const parts = official
+    ? ["official", "student competition", "register", "apply"]
+    : ["student competition", "high school", "youth"];
   const topicLabels = topics.filter((t) => t !== "Other" && t !== "Finance");
   if (topicLabels.length) parts.push(topicLabels.join(" "));
   if (inputs.otherText) parts.push(inputs.otherText);
@@ -69,7 +88,8 @@ function buildSearchQuery(inputs: FormInputs, topics: string[]): string {
   if (inputs.location) parts.push(inputs.location);
   if (inputs.format === "online") parts.push("online virtual");
   if (inputs.format === "in-person") parts.push("in-person local");
-  return parts.join(" ");
+  const negatives = '-quora -reddit -"top 10" -"best " -blog -list -medium';
+  return `${parts.join(" ")} ${negatives}`.trim();
 }
 
 function isCandidateUrl(url: string): boolean {
@@ -137,12 +157,128 @@ async function searchSerper(query: string, apiKey: string): Promise<SearchResult
   const data = await response.json();
   const results = data?.organic ?? [];
   return results
-    .map((r: { title?: string; link?: string; snippet?: string }) => ({
+    .map((r: { title?: string; link?: string; snippet?: string; imageUrl?: string }) => ({
       title: r.title ?? "",
       url: r.link ?? "",
       snippet: r.snippet ?? "",
+      image: r.imageUrl ?? "",
     }))
     .filter((r: SearchResult) => r.url && isCandidateUrl(r.url));
+}
+
+function isListicleOrAggregator(result: SearchResult): boolean {
+  const title = result.title.toLowerCase();
+  const combined = `${result.title} ${result.snippet}`.toLowerCase();
+
+  if (LISTICLE_TITLE_PATTERNS.some((pattern) => pattern.test(combined))) {
+    return true;
+  }
+
+  try {
+    const host = new URL(result.url).hostname.toLowerCase();
+    if (SKIP_DOMAINS.some((d) => host.includes(d))) return true;
+  } catch {
+    return true;
+  }
+
+  if (/\b(top|best)\b/.test(title) && /\d+/.test(title)) return true;
+
+  return false;
+}
+
+function faviconForUrl(pageUrl: string): string {
+  try {
+    const host = new URL(pageUrl).hostname;
+    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=128`;
+  } catch {
+    return "";
+  }
+}
+
+async function fetchOgImage(pageUrl: string): Promise<string> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+    const response = await fetch(pageUrl, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; CompCompAI/1.0)",
+        Accept: "text/html",
+      },
+      redirect: "follow",
+    });
+    clearTimeout(timeout);
+    if (!response.ok) return "";
+
+    const html = (await response.text()).slice(0, 60000);
+    const patterns = [
+      /<meta[^>]+property=["']og:image(?::url)?["'][^>]+content=["']([^"']+)["']/i,
+      /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image(?::url)?["']/i,
+      /<meta[^>]+name=["']twitter:image(?::src)?["'][^>]+content=["']([^"']+)["']/i,
+      /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image(?::src)?["']/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (match?.[1] && isSafeImageUrl(match[1], pageUrl)) {
+        return match[1];
+      }
+    }
+  } catch {
+    // ignore fetch/parse failures
+  }
+  return "";
+}
+
+function isSafeImageUrl(imageUrl: string, pageUrl: string): boolean {
+  try {
+    const parsed = new URL(imageUrl, pageUrl);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+async function resolveCompetitionImage(result: SearchResult): Promise<string> {
+  if (result.image && isSafeImageUrl(result.image, result.url)) {
+    return result.image;
+  }
+
+  const ogImage = await fetchOgImage(result.url);
+  if (ogImage) return ogImage;
+
+  return faviconForUrl(result.url);
+}
+
+function scoreSearchResult(result: SearchResult): number {
+  if (isListicleOrAggregator(result)) return -100;
+
+  let score = 0;
+  const combined = `${result.title} ${result.snippet}`.toLowerCase();
+
+  if (looksLikeCompetition(combined)) score += 5;
+
+  try {
+    const parsed = new URL(result.url);
+    const host = parsed.hostname.toLowerCase();
+    const path = parsed.pathname.toLowerCase();
+
+    if (host.endsWith(".org") || host.endsWith(".edu")) score += 3;
+    if (path === "/" || path.endsWith("/home") || path.includes("competition") || path.includes("contest")) {
+      score += 2;
+    }
+    if (host.includes("competition") || host.includes("contest") || host.includes("olympiad")) {
+      score += 2;
+    }
+  } catch {
+    score -= 5;
+  }
+
+  if (/\b(register|registration|apply|deadline|eligibility)\b/i.test(combined)) {
+    score += 2;
+  }
+
+  return score;
 }
 
 async function searchDuckDuckGo(query: string): Promise<SearchResult[]> {
@@ -204,6 +340,7 @@ function buildCompetitionFromSearchResult(
   result: SearchResult,
   inputs: FormInputs,
   userTopics: string[],
+  imageUrl: string,
   strictTopic = true,
 ): Record<string, unknown> | null {
   const combinedText = `${result.title} ${result.snippet}`;
@@ -220,7 +357,7 @@ function buildCompetitionFromSearchResult(
     name: result.title || "Competition",
     details: result.snippet || "Student competition found online.",
     link: result.url,
-    image: "",
+    image: imageUrl || faviconForUrl(result.url),
     topic,
     format,
     location: inputs.location || "Online",
@@ -234,6 +371,7 @@ function buildCompetitionFromSearchResult(
 function isUsableSearchResult(result: SearchResult, userTopics: string[], strict: boolean): boolean {
   if (!result.url || !result.title || result.title.length < 4) return false;
   if (!isCandidateUrl(result.url)) return false;
+  if (isListicleOrAggregator(result)) return false;
 
   const combined = `${result.title} ${result.snippet}`.toLowerCase();
   if (looksLikeCompetition(combined)) return true;
@@ -264,15 +402,15 @@ async function discoverFromWeb(
 ): Promise<{ imported: Record<string, unknown>[]; searchHits: number; errors: string[] }> {
   const topicLabel = userTopics.filter((t) => t !== "Other" && t !== "Finance").join(" ");
   const queries = [
+    buildSearchQuery(inputs, userTopics, true),
+    `${topicLabel} olympiad official site`.trim(),
+    `${topicLabel} contest registration high school`.trim(),
     buildSearchQuery(inputs, userTopics),
     `${topicLabel} student competition ${inputs.location}`.trim(),
     `${topicLabel} high school contest`.trim(),
-    `${topicLabel} olympiad youth`.trim(),
-    `${topicLabel} scholarship competition students`.trim(),
-    `site:.edu ${topicLabel} competition students`.trim(),
-    `site:.org ${topicLabel} contest high school`.trim(),
-    `${inputs.otherText || topicLabel} student competition`.trim(),
-    `${topicLabel} math science contest ${inputs.grade ? `grade ${inputs.grade}` : ""}`.trim(),
+    `site:.org ${topicLabel} competition students`.trim(),
+    `site:.edu ${topicLabel} contest high school`.trim(),
+    `${inputs.otherText || topicLabel} student competition official`.trim(),
   ];
   const uniqueQueries = [...new Set(queries.filter(Boolean))];
   const errors: string[] = [];
@@ -297,15 +435,25 @@ async function discoverFromWeb(
 
   const imported: Record<string, unknown>[] = [];
   const importedLinks = new Set<string>();
+  const rankedResults = [...allSearchResults].sort(
+    (a, b) => scoreSearchResult(b) - scoreSearchResult(a),
+  );
 
   const tryImport = async (strict: boolean) => {
-    for (const result of allSearchResults) {
+    for (const result of rankedResults) {
       if (imported.length >= maxCount) break;
       if (importedLinks.has(result.url)) continue;
 
       if (!isUsableSearchResult(result, userTopics, strict)) continue;
 
-      const competition = buildCompetitionFromSearchResult(result, inputs, userTopics, strict);
+      const imageUrl = await resolveCompetitionImage(result);
+      const competition = buildCompetitionFromSearchResult(
+        result,
+        inputs,
+        userTopics,
+        imageUrl,
+        strict,
+      );
       if (!competition) continue;
 
       imported.push(competition);
@@ -415,8 +563,13 @@ Deno.serve(async (req) => {
       ? selectTopCompetitions(rankCompetitions(allCompetitions ?? [], inputs))
       : [];
 
-    // STEP 3: Web results always shown first
-    const competitions = mergeWebPriority(webResults, dbResults);
+    // STEP 3: Web results always shown first; drop listicles/aggregators
+    const competitions = mergeWebPriority(webResults, dbResults).filter((comp) => {
+      const title = String(comp.name ?? comp.title ?? "");
+      const url = String(comp.link ?? comp.url ?? "");
+      const snippet = String(comp.details ?? comp.snippet ?? "");
+      return !isListicleOrAggregator({ title, url, snippet });
+    });
 
     const webCount = competitions.filter((c) => c.source === "web").length;
     const displayTopics = inputs.selectedTopics.filter((t) => t !== "Other").length

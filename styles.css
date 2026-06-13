@@ -619,8 +619,10 @@ body {
 .comp-card__image {
   display: block;
   width: 100%;
-  height: clamp(9rem, 18vh, 12rem);
-  object-fit: cover;
+  height: clamp(7rem, 14vh, 10rem);
+  object-fit: contain;
+  padding: 0.65rem;
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .comp-card__link {
