@@ -27,11 +27,14 @@ const SKIP_DOMAINS = [
   "quora.com", "medium.com", "prepory.com", "thoughtco.com", "wikihow.com",
   "answers.com", "yahoo.com", "buzzfeed.com", "student-tutor.com",
   "collegexpress.com", "prepscholar.com", "niche.com", "usnews.com",
+  "patch.com", "tapinto.net", "nj.com", "courierpostonline.com",
+  "northjersey.com", "app.com", "mycentraljersey.com",
 ];
 
 const BLOCKED_PATH_PATTERNS = [
   "/news/", "/blog/", "/article/", "/jobs/", "/careers/",
   "/posts/", "/stories/", "/guides/", "/list/", "/roundup/",
+  "/photos/", "/video/", "/media/", "/press/", "/announcements/",
 ];
 
 const LISTICLE_TITLE_PATTERNS = [
@@ -42,6 +45,28 @@ const LISTICLE_TITLE_PATTERNS = [
   /\b(top|best)\s+\d+\s+\w+\s+compet/i,
   /\bcompetitions for (high school|students)\b/i,
   /\?\s*-\s*quora\b/i,
+  /\bsummer programs?\b/i,
+  /\bapplying to college\b/i,
+];
+
+const NEWS_AND_JUNK_PATTERNS = [
+  /\b(photos?,? video|video:?|local news|press release)\b/i,
+  /\b(students? (win|won|wins|winning|show off|celebrate))\b/i,
+  /\b\[pdf\]\b/i,
+  /\.pdf(\?|#|$)/i,
+  /\b(school district|board of education)\b/i,
+  /\|\s*[^|]+\s+high school\s*$/i,
+  /\b(campus news|student news|weekly update)\b/i,
+];
+
+const KNOWN_COMPETITION_SIGNALS = [
+  /\bscience bowl\b/i,
+  /\bmathcounts\b/i,
+  /\b(amc|aime|usamo|usajmo)\b/i,
+  /\b(isef|regeneron sts|science olympiad|physics olympiad|usaco)\b/i,
+  /\b(deca|hosa|fbla|nhd|national history day)\b/i,
+  /\b(olympiad|contest information|competition information)\b/i,
+  /\b(register|registration|apply|eligibility|rules and guidelines)\b/i,
 ];
 
 interface SearchResult {
@@ -79,16 +104,16 @@ function parseInputs(body: Record<string, unknown>): FormInputs | null {
 
 function buildSearchQuery(inputs: FormInputs, topics: string[], official = false): string {
   const parts = official
-    ? ["official", "student competition", "register", "apply"]
-    : ["student competition", "high school", "youth"];
+    ? ["official", "student competition", "register", "apply", "national"]
+    : ["student competition", "high school", "national", "official"];
   const topicLabels = topics.filter((t) => t !== "Other" && t !== "Finance");
   if (topicLabels.length) parts.push(topicLabels.join(" "));
   if (inputs.otherText) parts.push(inputs.otherText);
   if (inputs.grade) parts.push(`grade ${inputs.grade}`);
-  if (inputs.location) parts.push(inputs.location);
+  // Intentionally omit location — it pulls local news instead of competitions
   if (inputs.format === "online") parts.push("online virtual");
-  if (inputs.format === "in-person") parts.push("in-person local");
-  const negatives = '-quora -reddit -"top 10" -"best " -blog -list -medium';
+  if (inputs.format === "in-person") parts.push("in-person");
+  const negatives = '-news -quora -reddit -"top 10" -"top 9" -"best " -blog -list -medium -photos -video -pdf -"summer program"';
   return `${parts.join(" ")} ${negatives}`.trim();
 }
 
@@ -166,7 +191,7 @@ async function searchSerper(query: string, apiKey: string): Promise<SearchResult
     .filter((r: SearchResult) => r.url && isCandidateUrl(r.url));
 }
 
-function isListicleOrAggregator(result: SearchResult): boolean {
+function isRejectedResult(result: SearchResult): boolean {
   const title = result.title.toLowerCase();
   const combined = `${result.title} ${result.snippet}`.toLowerCase();
 
@@ -174,9 +199,26 @@ function isListicleOrAggregator(result: SearchResult): boolean {
     return true;
   }
 
+  if (NEWS_AND_JUNK_PATTERNS.some((pattern) => pattern.test(combined))) {
+    return true;
+  }
+
   try {
-    const host = new URL(result.url).hostname.toLowerCase();
+    const parsed = new URL(result.url);
+    const host = parsed.hostname.toLowerCase();
+    const path = parsed.pathname.toLowerCase();
+
     if (SKIP_DOMAINS.some((d) => host.includes(d))) return true;
+    if (path.endsWith(".pdf")) return true;
+
+    if (
+      (host.includes(".k12.") || host.includes("schools.") || /highschool|high-school|\.k12\./.test(host)) &&
+      !path.includes("competition") &&
+      !path.includes("contest") &&
+      !KNOWN_COMPETITION_SIGNALS.some((s) => s.test(combined))
+    ) {
+      return true;
+    }
   } catch {
     return true;
   }
@@ -184,6 +226,100 @@ function isListicleOrAggregator(result: SearchResult): boolean {
   if (/\b(top|best)\b/.test(title) && /\d+/.test(title)) return true;
 
   return false;
+}
+
+function isOfficialCompetitionResult(result: SearchResult): boolean {
+  if (isRejectedResult(result)) return false;
+
+  const combined = `${result.title} ${result.snippet}`;
+  if (!looksLikeCompetition(combined.toLowerCase())) return false;
+
+  if (KNOWN_COMPETITION_SIGNALS.some((pattern) => pattern.test(combined))) {
+    return true;
+  }
+
+  try {
+    const parsed = new URL(result.url);
+    const host = parsed.hostname.toLowerCase();
+    const path = parsed.pathname.toLowerCase();
+
+    if (host.endsWith(".gov")) return true;
+
+    if (host.endsWith(".org") || host.endsWith(".edu")) {
+      if (
+        path.includes("competition") ||
+        path.includes("contest") ||
+        path.includes("olympiad") ||
+        path.includes("register")
+      ) {
+        return true;
+      }
+    }
+
+    if (
+      host.includes("competition") ||
+      host.includes("contest") ||
+      host.includes("olympiad") ||
+      host.includes("mathcounts") ||
+      host.includes("sciencebowl")
+    ) {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+
+  return /\b(official|register|registration|eligibility|annual competition)\b/i.test(combined);
+}
+
+async function filterWithGemini(results: SearchResult[], apiKey: string): Promise<SearchResult[]> {
+  if (!results.length) return [];
+
+  const batch = results.slice(0, 25);
+  const numbered = batch
+    .map((r, i) => `${i}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet.slice(0, 140)}`)
+    .join("\n\n");
+
+  const prompt = `You filter search results for a high school competition finder app.
+
+KEEP only official competition pages a student can enter (registration, rules, eligibility, official org homepage for a named contest like Science Bowl or MATHCOUNTS).
+
+REJECT: news articles, photos/video stories, school win announcements, listicles ("top 10"), summer program roundups, college admissions blogs, PDFs, Quora, generic school homepages, local news.
+
+Results:
+${numbered}
+
+Reply with ONLY JSON like {"keep":[0,2,5]} — indices to keep. If none qualify, {"keep":[]}.`;
+
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0, maxOutputTokens: 256 },
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      return batch.filter(isOfficialCompetitionResult);
+    }
+
+    const data = await response.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return batch.filter(isOfficialCompetitionResult);
+
+    const parsed = JSON.parse(jsonMatch[0]) as { keep?: number[] };
+    const keep = new Set((parsed.keep ?? []).filter((n) => Number.isInteger(n)));
+    if (!keep.size) return [];
+    return batch.filter((_, index) => keep.has(index));
+  } catch {
+    return batch.filter(isOfficialCompetitionResult);
+  }
 }
 
 function faviconForUrl(pageUrl: string): string {
@@ -195,41 +331,6 @@ function faviconForUrl(pageUrl: string): string {
   }
 }
 
-async function fetchOgImage(pageUrl: string): Promise<string> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2500);
-    const response = await fetch(pageUrl, {
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; CompCompAI/1.0)",
-        Accept: "text/html",
-      },
-      redirect: "follow",
-    });
-    clearTimeout(timeout);
-    if (!response.ok) return "";
-
-    const html = (await response.text()).slice(0, 60000);
-    const patterns = [
-      /<meta[^>]+property=["']og:image(?::url)?["'][^>]+content=["']([^"']+)["']/i,
-      /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image(?::url)?["']/i,
-      /<meta[^>]+name=["']twitter:image(?::src)?["'][^>]+content=["']([^"']+)["']/i,
-      /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image(?::src)?["']/i,
-    ];
-
-    for (const pattern of patterns) {
-      const match = html.match(pattern);
-      if (match?.[1] && isSafeImageUrl(match[1], pageUrl)) {
-        return match[1];
-      }
-    }
-  } catch {
-    // ignore fetch/parse failures
-  }
-  return "";
-}
-
 function isSafeImageUrl(imageUrl: string, pageUrl: string): boolean {
   try {
     const parsed = new URL(imageUrl, pageUrl);
@@ -239,19 +340,16 @@ function isSafeImageUrl(imageUrl: string, pageUrl: string): boolean {
   }
 }
 
-async function resolveCompetitionImage(result: SearchResult): Promise<string> {
+function resolveCompetitionImage(result: SearchResult): string {
   if (result.image && isSafeImageUrl(result.image, result.url)) {
     return result.image;
   }
-
-  const ogImage = await fetchOgImage(result.url);
-  if (ogImage) return ogImage;
-
   return faviconForUrl(result.url);
 }
 
 function scoreSearchResult(result: SearchResult): number {
-  if (isListicleOrAggregator(result)) return -100;
+  if (isRejectedResult(result)) return -100;
+  if (!isOfficialCompetitionResult(result)) return -50;
 
   let score = 0;
   const combined = `${result.title} ${result.snippet}`.toLowerCase();
@@ -368,29 +466,23 @@ function buildCompetitionFromSearchResult(
   };
 }
 
-function isUsableSearchResult(result: SearchResult, userTopics: string[], strict: boolean): boolean {
+function isUsableSearchResult(result: SearchResult): boolean {
   if (!result.url || !result.title || result.title.length < 4) return false;
   if (!isCandidateUrl(result.url)) return false;
-  if (isListicleOrAggregator(result)) return false;
+  return isOfficialCompetitionResult(result);
+}
 
-  const combined = `${result.title} ${result.snippet}`.toLowerCase();
-  if (looksLikeCompetition(combined)) return true;
+function competitionRecordToSearchResult(comp: Record<string, unknown>): SearchResult {
+  return {
+    title: String(comp.name ?? comp.title ?? ""),
+    url: String(comp.link ?? comp.url ?? ""),
+    snippet: String(comp.details ?? comp.snippet ?? ""),
+    image: String(comp.image ?? comp.image_url ?? ""),
+  };
+}
 
-  if (strict) return false;
-
-  const topicWords = userTopics
-    .filter((t) => t !== "Other" && t !== "Finance")
-    .map((t) => t.toLowerCase());
-
-  if (topicWords.some((t) => combined.includes(t))) return true;
-
-  return (
-    combined.includes("student") ||
-    combined.includes("high school") ||
-    combined.includes("youth") ||
-    combined.includes("olympiad") ||
-    combined.includes("contest")
-  );
+function isRejectedCompetitionRecord(comp: Record<string, unknown>): boolean {
+  return isRejectedResult(competitionRecordToSearchResult(comp));
 }
 
 async function discoverFromWeb(
@@ -403,14 +495,13 @@ async function discoverFromWeb(
   const topicLabel = userTopics.filter((t) => t !== "Other" && t !== "Finance").join(" ");
   const queries = [
     buildSearchQuery(inputs, userTopics, true),
-    `${topicLabel} olympiad official site`.trim(),
-    `${topicLabel} contest registration high school`.trim(),
-    buildSearchQuery(inputs, userTopics),
-    `${topicLabel} student competition ${inputs.location}`.trim(),
-    `${topicLabel} high school contest`.trim(),
-    `site:.org ${topicLabel} competition students`.trim(),
-    `site:.edu ${topicLabel} contest high school`.trim(),
-    `${inputs.otherText || topicLabel} student competition official`.trim(),
+    `${topicLabel} national science bowl official site`.trim(),
+    `${topicLabel} olympiad registration site:.org`.trim(),
+    `${topicLabel} contest registration high school official`.trim(),
+    `site:.gov ${topicLabel} competition students`.trim(),
+    `site:.org ${topicLabel} competition students register`.trim(),
+    `site:.edu ${topicLabel} olympiad`.trim(),
+    `${inputs.otherText || topicLabel} official competition register`.trim(),
   ];
   const uniqueQueries = [...new Set(queries.filter(Boolean))];
   const errors: string[] = [];
@@ -435,44 +526,46 @@ async function discoverFromWeb(
 
   const imported: Record<string, unknown>[] = [];
   const importedLinks = new Set<string>();
-  const rankedResults = [...allSearchResults].sort(
-    (a, b) => scoreSearchResult(b) - scoreSearchResult(a),
-  );
+  let rankedResults = [...allSearchResults]
+    .filter(isOfficialCompetitionResult)
+    .sort((a, b) => scoreSearchResult(b) - scoreSearchResult(a));
 
-  const tryImport = async (strict: boolean) => {
-    for (const result of rankedResults) {
-      if (imported.length >= maxCount) break;
-      if (importedLinks.has(result.url)) continue;
+  const geminiKey = Deno.env.get("GEMINI_API_KEY") ?? "";
+  if (geminiKey && rankedResults.length) {
+    rankedResults = await filterWithGemini(rankedResults, geminiKey);
+  }
 
-      if (!isUsableSearchResult(result, userTopics, strict)) continue;
+  for (const result of rankedResults) {
+    if (imported.length >= maxCount) break;
+    if (importedLinks.has(result.url)) continue;
+    if (!isUsableSearchResult(result)) continue;
 
-      const imageUrl = await resolveCompetitionImage(result);
-      const competition = buildCompetitionFromSearchResult(
-        result,
-        inputs,
-        userTopics,
-        imageUrl,
-        strict,
-      );
-      if (!competition) continue;
+    const imageUrl = resolveCompetitionImage(result);
+    const competition = buildCompetitionFromSearchResult(
+      result,
+      inputs,
+      userTopics,
+      imageUrl,
+      true,
+    );
+    if (!competition) continue;
 
-      imported.push(competition);
-      importedLinks.add(result.url);
+    imported.push(competition);
+    importedLinks.add(result.url);
 
-      if (!existingLinks.has(result.url)) {
-        const { error } = await supabase.from("competitions").insert(competition);
-        if (error && !String(error.message).toLowerCase().includes("duplicate")) {
-          errors.push(error.message);
-        } else {
-          existingLinks.add(result.url);
-        }
+    if (!existingLinks.has(result.url)) {
+      const { error } = await supabase.from("competitions").insert(competition);
+      if (error && !String(error.message).toLowerCase().includes("duplicate")) {
+        errors.push(error.message);
+      } else {
+        existingLinks.add(result.url);
       }
+    } else {
+      await supabase
+        .from("competitions")
+        .update({ image: imageUrl, details: competition.details, name: competition.name })
+        .eq("link", result.url);
     }
-  };
-
-  await tryImport(true);
-  if (imported.length < maxCount) {
-    await tryImport(false);
   }
 
   return { imported: imported.slice(0, maxCount), searchHits: allSearchResults.length, errors };
@@ -558,18 +651,20 @@ Deno.serve(async (req) => {
       TARGET_RESULTS,
     );
 
-    // STEP 2: Database only fills gaps when web has fewer than 10
-    const dbResults = webResults.length < TARGET_RESULTS
-      ? selectTopCompetitions(rankCompetitions(allCompetitions ?? [], inputs))
+    const qualityWebResults = webResults.filter((comp) => !isRejectedCompetitionRecord(comp));
+
+    // STEP 2: Curated DB only fills gaps — never old bad web imports
+    const curatedCompetitions = (allCompetitions ?? []).filter(
+      (c) => (c.source ?? "manual") === "manual" && !isRejectedCompetitionRecord(c),
+    );
+    const dbResults = qualityWebResults.length < TARGET_RESULTS
+      ? selectTopCompetitions(rankCompetitions(curatedCompetitions, inputs))
       : [];
 
-    // STEP 3: Web results always shown first; drop listicles/aggregators
-    const competitions = mergeWebPriority(webResults, dbResults).filter((comp) => {
-      const title = String(comp.name ?? comp.title ?? "");
-      const url = String(comp.link ?? comp.url ?? "");
-      const snippet = String(comp.details ?? comp.snippet ?? "");
-      return !isListicleOrAggregator({ title, url, snippet });
-    });
+    // STEP 3: Web results first, drop anything that slipped through
+    const competitions = mergeWebPriority(qualityWebResults, dbResults).filter(
+      (comp) => !isRejectedCompetitionRecord(comp),
+    );
 
     const webCount = competitions.filter((c) => c.source === "web").length;
     const displayTopics = inputs.selectedTopics.filter((t) => t !== "Other").length

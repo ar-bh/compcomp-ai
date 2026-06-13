@@ -715,7 +715,7 @@ function isSafeHttpUrl(value) {
 }
 
 function getCompetitionImage(competition) {
-  return getCompetitionField(competition, [
+  const fromField = getCompetitionField(competition, [
     "image_url",
     "image",
     "img_url",
@@ -723,6 +723,22 @@ function getCompetitionImage(competition) {
     "thumbnail",
     "thumbnail_url",
   ]);
+
+  if (isSafeHttpUrl(fromField)) {
+    return fromField;
+  }
+
+  const linkUrl = getCompetitionLink(competition);
+  if (isSafeHttpUrl(linkUrl)) {
+    try {
+      const host = new URL(linkUrl).hostname;
+      return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=128`;
+    } catch {
+      return "";
+    }
+  }
+
+  return "";
 }
 
 function getCompetitionLink(competition) {
@@ -750,6 +766,7 @@ function renderCompetitionImage(competition, name) {
         src="${escapeHtml(imageUrl)}"
         alt="${escapeHtml(name || "Competition")}"
         loading="lazy"
+        referrerpolicy="no-referrer"
       />
     </div>
   `;

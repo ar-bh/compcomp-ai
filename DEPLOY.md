@@ -53,6 +53,16 @@ The Edge Function searches the web first to find up to 10 competitions. **Serper
 
 Without this key, Bing/DuckDuckGo are tried as fallbacks (often blocked from Supabase — expect 0 results).
 
+### Optional — AI result filtering (recommended)
+
+For better quality (filters out news, listicles, and school announcements):
+
+1. Get a free API key from [Google AI Studio](https://aistudio.google.com/apikey)
+2. Supabase Dashboard → **Edge Functions** → **Secrets**
+3. Add: `GEMINI_API_KEY` = your key
+
+The Edge Function sends search results to Gemini Flash and keeps only official competition pages. Without this key, strict rule-based filtering is used instead.
+
 ---
 
 ## Step 4: Smoke test
