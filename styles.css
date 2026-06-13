@@ -603,6 +603,10 @@ body {
   border-top: 1px solid rgba(255, 255, 255, 0.12);
 }
 
+.results-section__title {
+  margin-bottom: 0.85rem;
+}
+
 .competitions-suggested__title {
   font-size: clamp(0.95rem, 2vh, 1.1rem);
   font-weight: 700;

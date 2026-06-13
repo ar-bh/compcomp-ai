@@ -30,6 +30,8 @@ export const INTEREST_TOPICS: Record<string, string[]> = {
     "robotics", "robot", "software", "engineering", "engineer",
     "hackathon", "developer", "apps", "artificial intelligence",
     "machine learning", "electronics", "hardware", "esports",
+    "usaco", "first robotics", "cyberpatriot", "technovation",
+    "programming contest", "coding competition", "computing olympiad",
   ],
   Mathematics: [
     "mathematics", "math", "maths", "calculus", "algebra", "geometry", "statistics",
@@ -303,7 +305,8 @@ export function competitionMatchesTopic(
     if (topic === "Finance") {
       return canonicalField === "Finance" || canonicalField === "Mathematics";
     }
-    return canonicalField === topic;
+    if (canonicalField === topic) return true;
+    // DB topic tag may be wrong — fall through to keyword check below.
   }
 
   const keywords = INTEREST_TOPICS[topic] ?? [];
@@ -541,12 +544,18 @@ export function topicExplicitlyConflictsWithSearch(
   const effective = userTopics.filter((t) => t !== "Other");
   if (!effective.length) return false;
 
-  return !effective.some((topic) => {
+  const canonicalOk = effective.some((topic) => {
     if (canonical === topic) return true;
     if (topic === "Finance" && (canonical === "Mathematics" || canonical === "Finance")) return true;
     if (topic === "Mathematics" && canonical === "Finance") return true;
     return false;
   });
+  if (canonicalOk) return false;
+
+  // Text matches the user's topic — wrong DB tag, not a hard conflict.
+  if (effective.some((topic) => competitionMatchesTopic(competition, topic, ""))) return false;
+
+  return true;
 }
 
 export function getMatchedTopicsForCompetition(
@@ -940,7 +949,7 @@ export function pickSuggestedCompetitions(
     if (seen.has(id)) continue;
     seen.add(id);
     picked.push(item.competition);
-    if (picked.length >= limit) break;
+    if (limit > 0 && picked.length >= limit) break;
   }
 
   return picked;
