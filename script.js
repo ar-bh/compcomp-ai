@@ -864,14 +864,14 @@ function renderCompetitionCard(competition) {
   const schedule = getCompetitionField(competition, ["time", "date", "deadline"]);
   const displayTopic = getDisplayTopic(competition);
   const source = getCompetitionField(competition, ["source"]);
-  const isWebSource = source === "web";
+  const isNewWebResult = competition._isNewWeb === true;
 
   return `
-    <article class="comp-card${isWebSource ? " comp-card--web" : ""}">
+    <article class="comp-card${isNewWebResult ? " comp-card--web" : ""}">
       ${renderCompetitionImage(competition, name)}
       <header class="comp-card__header">${escapeHtml(name || "Competition")}</header>
       <div class="comp-card__meta">
-        ${isWebSource ? `<span class="comp-card__tag comp-card__tag--source">Found online</span>` : ""}
+        ${isNewWebResult ? `<span class="comp-card__tag comp-card__tag--source">Found online</span>` : ""}
         ${displayTopic ? `<span class="comp-card__tag comp-card__tag--topic">${escapeHtml(displayTopic)}</span>` : ""}
         ${grade ? `<span class="comp-card__tag comp-card__tag--grade">${escapeHtml(formatGradeLabel(grade))}</span>` : ""}
         ${format ? `<span class="comp-card__tag comp-card__tag--format">${escapeHtml(formatFormatLabel(format))}</span>` : ""}

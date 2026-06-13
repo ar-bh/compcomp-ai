@@ -578,12 +578,30 @@ export function rankCompetitions(
   return scored;
 }
 
+export function normalizeCompetitionLink(url: string): string {
+  try {
+    const parsed = new URL(String(url).trim());
+    parsed.hash = "";
+    parsed.search = "";
+    const path = parsed.pathname.replace(/\/+$/, "") || "/";
+    return `${parsed.protocol}//${parsed.hostname.toLowerCase()}${path}`;
+  } catch {
+    return String(url).trim().toLowerCase();
+  }
+}
+
 export function getCompetitionId(competition: Record<string, unknown>): string {
-  return String(
-    competition.id ??
-      competition.uuid ??
-      getCompetitionField(competition, ["name", "title", "competition_name", "link"]),
-  );
+  if (competition.id !== undefined && competition.id !== null) {
+    return String(competition.id);
+  }
+  if (competition.uuid !== undefined && competition.uuid !== null) {
+    return String(competition.uuid);
+  }
+
+  const link = getCompetitionField(competition, ["link", "url", "website"]);
+  if (link) return normalizeCompetitionLink(link);
+
+  return getCompetitionField(competition, ["name", "title", "competition_name"]);
 }
 
 export function selectTopCompetitions(scored: ScoredCompetition[]): Record<string, unknown>[] {
