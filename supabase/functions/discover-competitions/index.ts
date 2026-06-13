@@ -24,6 +24,7 @@ import {
   pickSuggestedCompetitions,
   passesSuggestedRelevanceGate,
   competitionMatchesOtherText,
+  inferTopicFromText,
 } from "../_shared/matching.ts";
 import {
   inferTimeLabel,
@@ -499,11 +500,17 @@ function assignCompetitionImage(
   return { ...comp, image };
 }
 
-function scoreSearchResult(result: SearchResult): number {
+function scoreSearchResult(result: SearchResult, otherText = ""): number {
   if (isRejectedResult(result)) return -100;
-  if (!isOfficialCompetitionResult(result)) return -50;
 
   let score = 0;
+  if (otherText && searchResultMatchesQuery(result, otherText)) score += 50;
+
+  if (!isOfficialCompetitionResult(result)) {
+    if (score < 40) return -50;
+  } else {
+    score += 5;
+  }
   const combined = `${result.title} ${result.snippet}`.toLowerCase();
 
   if (looksLikeCompetition(combined)) score += 5;
@@ -586,6 +593,14 @@ function looksLikeCompetition(text: string): boolean {
   return signals.some((s) => normalized.includes(s) || textMatchesKeyword(normalized, s));
 }
 
+function searchResultMatchesQuery(result: SearchResult, query: string): boolean {
+  if (!query.trim()) return false;
+  return competitionMatchesOtherText(
+    { name: result.title, details: result.snippet, link: result.url, topic: "" },
+    query,
+  );
+}
+
 function buildCompetitionFromSearchResult(
   result: SearchResult,
   inputs: FormInputs,
@@ -594,6 +609,9 @@ function buildCompetitionFromSearchResult(
   strictTopic = true,
 ): Record<string, unknown> | null {
   const combinedText = `${result.title} ${result.snippet}`;
+  const matchesSearch = Boolean(inputs.otherText) &&
+    searchResultMatchesQuery(result, inputs.otherText);
+
   let topic = inferBestTopicForUser(combinedText, userTopics);
 
   if (!topic && userTopics.length > 0) {
@@ -605,21 +623,28 @@ function buildCompetitionFromSearchResult(
     topic = matched.find((t) => t !== "Other") ?? null;
   }
 
-  if (!topic && strictTopic && userTopics.length > 0 && !userTopics.includes("Other")) {
+  if (matchesSearch) {
+    topic = topic ?? inferTopicFromText(combinedText) ??
+      userTopics.find((t) => t !== "Other") ?? "Technology";
+  } else if (!topic && strictTopic && userTopics.length > 0 && !userTopics.includes("Other")) {
     return null;
   }
 
-  topic = topic ?? userTopics.find((t) => t !== "Other") ?? null;
+  topic = topic ?? userTopics.find((t) => t !== "Other") ?? inferTopicFromText(combinedText) ?? null;
   if (!topic) return null;
-  const matchedTopics = getMatchedTopicsForCompetition(
-    { name: result.title, details: result.snippet, topic: String(topic) },
-    userTopics,
-    inputs.otherText,
-  ).filter((t) => t !== "Other");
-  if (userTopics.length > 0 && !userTopics.includes("Other") && matchedTopics.length === 0) {
-    return null;
+
+  if (!matchesSearch) {
+    const matchedTopics = getMatchedTopicsForCompetition(
+      { name: result.title, details: result.snippet, topic: String(topic) },
+      userTopics,
+      inputs.otherText,
+    ).filter((t) => t !== "Other");
+    if (userTopics.length > 0 && !userTopics.includes("Other") && matchedTopics.length === 0) {
+      return null;
+    }
+    if (matchedTopics.length) topic = matchedTopics[0];
   }
-  if (matchedTopics.length) topic = matchedTopics[0];
+
   const format = inputs.format || inferFormatFromText(combinedText) || "online";
   const time = inferTimeLabel(combinedText);
 
@@ -636,16 +661,18 @@ function buildCompetitionFromSearchResult(
     source: "web",
     ...(time ? { time } : {}),
     _matchedTopics: [topic],
+    ...(matchesSearch ? { _searchMatch: true } : {}),
   };
 
-  if (!isCompetitionUpcoming(competition)) return null;
+  if (!matchesSearch && !isCompetitionUpcoming(competition)) return null;
 
   return competition;
 }
 
-function isUsableSearchResult(result: SearchResult): boolean {
+function isUsableSearchResult(result: SearchResult, otherText = ""): boolean {
   if (!result.url || !result.title || result.title.length < 4) return false;
   if (!isCandidateUrl(result.url)) return false;
+  if (otherText && searchResultMatchesQuery(result, otherText)) return true;
   return isOfficialCompetitionResult(result);
 }
 
@@ -674,6 +701,16 @@ function isRejectedCompetitionRecord(
   userTopics: string[] = [],
   otherText = "",
 ): boolean {
+  const matchesSearch = Boolean(otherText) && competitionMatchesOtherText(comp, otherText);
+
+  if (matchesSearch) {
+    if (isCompetitionResultsPage(comp)) return true;
+    if (isRejectedResult(competitionRecordToSearchResult(comp))) return true;
+    const scheduleText = `${comp.name ?? ""} ${comp.details ?? ""} ${comp.time ?? ""}`;
+    if (isClosedScheduleText(scheduleText)) return true;
+    return false;
+  }
+
   if (isCompetitionResultsPage(comp)) return true;
   if (topicExplicitlyConflictsWithSearch(comp, userTopics)) return true;
   if (isRejectedResult(competitionRecordToSearchResult(comp))) return true;
@@ -709,16 +746,16 @@ async function discoverFromWeb(
 
   const topicLabel = userTopics.filter((t) => t !== "Other" && t !== "Finance").join(" ");
   const searchPhrase = inputs.otherText.trim();
-  const primaryQuery = searchPhrase
-    ? `${searchPhrase} student competition program registration official`
-    : userTopics.includes("Technology")
+  const primaryQuery = searchPhrase || (userTopics.includes("Technology")
     ? "USACO hackathon FIRST robotics programming contest registration high school official site:.org"
     : userTopics.includes("Mathematics")
     ? "AMC AIME MATHCOUNTS USAMO math competition registration high school official site:.org"
     : userTopics.includes("Science")
     ? "Science Olympiad ISEF science fair registration high school official site:.org"
     : buildSearchQuery(inputs, userTopics, true);
-  const fallbackQuery = `${topicLabel} student competition registration official site:.org`.trim();
+  const fallbackQuery = searchPhrase
+    ? `${searchPhrase} registration official site`
+    : `${topicLabel} student competition registration official site:.org`.trim();
   const queryPlan = [primaryQuery, fallbackQuery].filter(Boolean);
   const errors: string[] = [];
 
@@ -730,7 +767,7 @@ async function discoverFromWeb(
 
   for (let i = 0; i < queryPlan.length; i += 1) {
     const query = queryPlan[i];
-    if (i > 0 && allSearchResults.filter(isOfficialCompetitionResult).length >= maxDisplay) break;
+    if (i > 0 && allSearchResults.filter((r) => passesWebCandidateGate(r, userTopics, inputs.otherText)).length >= maxDisplay) break;
     if (serperQueries >= MAX_SERPER_QUERIES_WHEN_EMPTY) break;
     if (i > 0 && serperQueries >= MAX_SERPER_QUERIES) break;
 
@@ -756,7 +793,7 @@ async function discoverFromWeb(
   // Rule filters only for web — one Gemini call runs on the final merged list (avoids 429 rate limits).
   const rankedResults = [...allSearchResults]
     .filter((r) => passesWebCandidateGate(r, userTopics, inputs.otherText))
-    .sort((a, b) => scoreSearchResult(b) - scoreSearchResult(a));
+    .sort((a, b) => scoreSearchResult(b, inputs.otherText) - scoreSearchResult(a, inputs.otherText));
 
   const displayResults: Record<string, unknown>[] = [];
   const suggestedWeb: Record<string, unknown>[] = [];
@@ -769,8 +806,9 @@ async function discoverFromWeb(
 
     const normalizedUrl = normalizeCompetitionLink(result.url);
     if (importedLinks.has(normalizedUrl)) continue;
-    if (!isUsableSearchResult(result)) continue;
+    if (!isUsableSearchResult(result, inputs.otherText)) continue;
 
+    const matchesSearch = searchResultMatchesQuery(result, inputs.otherText);
     const imageUrl = result.image && isSafeImageUrl(result.image, result.url)
       ? result.image
       : faviconForUrl(result.url);
@@ -779,7 +817,7 @@ async function discoverFromWeb(
       inputs,
       userTopics,
       imageUrl,
-      true,
+      !matchesSearch,
     );
     if (!competition) continue;
 
@@ -1085,6 +1123,12 @@ Deno.serve(async (req) => {
     let geminiFilterUsed = false;
     let geminiNote = "";
 
+    const searchPhrase = inputs.otherText.trim();
+    const dbHasSearchMatch = searchPhrase
+      ? eligibleDb.some((c) => competitionMatchesOtherText(c, searchPhrase))
+      : false;
+    const webImportTarget = searchPhrase && !dbHasSearchMatch ? TARGET_RESULTS : TARGET_WEB_SLOTS;
+
     if (serperKey) {
       webSearchUsed = true;
       const webDiscovery = await discoverFromWeb(
@@ -1092,7 +1136,7 @@ Deno.serve(async (req) => {
         inputs,
         userTopics,
         existingLinks,
-        TARGET_WEB_SLOTS,
+        webImportTarget,
       );
       webResults = webDiscovery.imported.filter(
         (comp) => !isRejectedCompetitionRecord(comp, userTopics, inputs.otherText),
@@ -1145,6 +1189,20 @@ Deno.serve(async (req) => {
       userTopics,
       imageAllocator,
     ).filter((comp) => !isRejectedCompetitionRecord(comp, userTopics, inputs.otherText));
+
+    if (searchPhrase && webResults.length) {
+      const searchMatchedWeb = webResults.filter((comp) =>
+        competitionMatchesOtherText(comp, searchPhrase)
+      );
+      if (searchMatchedWeb.length) {
+        const seen = new Set(searchMatchedWeb.map((c) => getCompetitionId(c)));
+        const rest = competitions.filter((c) => !seen.has(getCompetitionId(c)));
+        competitions = dedupeCompetitionResults([
+          ...searchMatchedWeb.map((c) => assignCompetitionImage(c, imageAllocator)),
+          ...rest,
+        ]).slice(0, TARGET_RESULTS);
+      }
+    }
 
     const primaryIds = new Set(competitions.map((comp) => getCompetitionId(comp)));
     const suggestedPool = allCompetitions

@@ -88,6 +88,19 @@ body {
   color: transparent;
 }
 
+.hero__description {
+  max-width: 36rem;
+  font-size: clamp(0.95rem, 1.6vw, 1.125rem);
+  font-weight: 400;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.hero__description strong {
+  color: rgba(255, 255, 255, 0.9);
+  font-weight: 600;
+}
+
 .hero__tagline {
   max-width: 28rem;
   font-size: clamp(0.95rem, 1.6vw, 1.125rem);
@@ -197,15 +210,6 @@ body {
   letter-spacing: 0.08em;
   text-decoration: underline;
   text-underline-offset: 0.35em;
-}
-
-.get-started__intro {
-  max-width: 42rem;
-  margin: 0 auto clamp(1.25rem, 3vh, 2rem);
-  text-align: center;
-  font-size: clamp(0.92rem, 2vh, 1.05rem);
-  line-height: 1.55;
-  color: rgba(255, 255, 255, 0.78);
 }
 
 .field--search {
