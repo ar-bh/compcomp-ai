@@ -33,7 +33,9 @@ export const INTEREST_TOPICS: Record<string, string[]> = {
   Mathematics: [
     "mathematics", "math", "maths", "calculus", "algebra", "geometry", "statistics",
     "quantitative", "actuary", "proofs", "finance", "financial", "investing",
-    "stock market", "accounting", "budgeting", "economics", "olympiad",
+    "stock market", "accounting", "budgeting", "economics",
+    "mathcounts", "math league", "math contest", "math competition", "mathematical olympiad",
+    "math olympiad", "amc", "aime", "usamo", "usajmo", "putnam", "hmmt",
   ],
   Arts: [
     "arts", "art", "music", "musical", "drawing", "painting", "creative",
@@ -83,11 +85,18 @@ const TOPIC_NEGATIVE_KEYWORDS: Record<string, string[]> = {
     "scholastic art", " art ", "writing awards", "creative writing", "history day",
     "debate", "literature", "humanities", "business", "marketing", "entrepreneurship",
     "deca", "career development", "computing olympiad", "usaco", "programming contest",
-    "coding competition", "biology", "chemistry",
+    "coding competition", "biology", "chemistry", "physics", "science olympiad", "science bowl",
+    "science fair", "isef", "regeneron", "envirothon", "usabo", "usnco", "physics olympiad",
+    "chemistry olympiad", "biology olympiad", "science and engineering", "science & engineering",
     "mock trial", "courtroom", "litigation", "attorney", "witness", "legal experts",
     "mock trial championship", "trial championship",
   ],
-  Science: ["poetry", "poem", "music", "debate", "history day", "art competition"],
+  Science: [
+    "poetry", "poem", "music", "debate", "history day", "art competition",
+    "mathcounts", "amc", "aime", "usamo", "usajmo", "math league", "math olympiad",
+    "mathematical olympiad", "algebra", "calculus", "geometry", "trigonometry",
+    "math competition", "math contest",
+  ],
   Technology: ["poetry", "poem", "music", "dance", "history day", "mock trial", "courtroom", "litigation"],
   Arts: ["calculus", "algebra", "geometry", "olympiad", "hackathon", "robotics", "programming"],
   Finance: ["poetry", "poem", "music", "dance", "science fair", "biology"],
@@ -513,14 +522,30 @@ function inputsHasOtherWithInference(topics: string[], otherText: string): boole
   return topics.includes("Other") && Boolean(otherText);
 }
 
-const STEM_TOPICS = new Set(["Science", "Technology", "Mathematics"]);
-
 function canonicalTopicAllowsKeywordMatch(canonical: string | null, topic: string): boolean {
   if (!canonical) return true;
   if (canonical === topic) return true;
   if (topic === "Finance" && (canonical === "Mathematics" || canonical === "Finance")) return true;
-  if (STEM_TOPICS.has(canonical) && STEM_TOPICS.has(topic)) return true;
+  if (topic === "Mathematics" && canonical === "Finance") return true;
   return false;
+}
+
+export function topicExplicitlyConflictsWithSearch(
+  competition: Record<string, unknown>,
+  userTopics: string[],
+): boolean {
+  const canonical = getCanonicalTopicFromField(competition);
+  if (!canonical || userTopics.includes("Other")) return false;
+
+  const effective = userTopics.filter((t) => t !== "Other");
+  if (!effective.length) return false;
+
+  return !effective.some((topic) => {
+    if (canonical === topic) return true;
+    if (topic === "Finance" && (canonical === "Mathematics" || canonical === "Finance")) return true;
+    if (topic === "Mathematics" && canonical === "Finance") return true;
+    return false;
+  });
 }
 
 export function getMatchedTopicsForCompetition(
@@ -863,7 +888,7 @@ export function selectTopCompetitions(scored: ScoredCompetition[]): Record<strin
   return top;
 }
 
-export function inferTopicFromText(text: string): string {
+export function inferTopicFromText(text: string): string | null {
   const normalized = normalizeInterestText(text);
   for (const [topic, keywords] of Object.entries(INTEREST_TOPICS)) {
     if (topic === "Finance") continue;
@@ -871,7 +896,7 @@ export function inferTopicFromText(text: string): string {
     if (textMatchesKeyword(normalized, topic)) return topic;
     if (keywords.some((kw) => kw.length >= 4 && textMatchesKeyword(normalized, kw))) return topic;
   }
-  return "Science";
+  return null;
 }
 
 export function inferBestTopicForUser(text: string, userTopics: string[]): string | null {
@@ -881,7 +906,7 @@ export function inferBestTopicForUser(text: string, userTopics: string[]): strin
     if (competitionMatchesTopic(stub, topic, "")) return topic;
   }
   const inferred = inferTopicFromText(text);
-  if (userTopics.includes(inferred)) return inferred;
+  if (inferred && userTopics.includes(inferred)) return inferred;
   if (userTopics.includes("Finance") && inferred === "Mathematics") return "Finance";
   return null;
 }

@@ -19,6 +19,7 @@ import {
   inferCompetitionLocation,
   refreshWebRowMetadata,
   getMatchedTopicsForCompetition,
+  topicExplicitlyConflictsWithSearch,
 } from "../_shared/matching.ts";
 import {
   inferTimeLabel,
@@ -602,7 +603,8 @@ function buildCompetitionFromSearchResult(
     return null;
   }
 
-  topic = topic ?? userTopics[0] ?? "Science";
+  topic = topic ?? userTopics.find((t) => t !== "Other") ?? null;
+  if (!topic) return null;
   const matchedTopics = getMatchedTopicsForCompetition(
     { name: result.title, details: result.snippet, topic: String(topic) },
     userTopics,
@@ -666,6 +668,7 @@ function isRejectedCompetitionRecord(
   otherText = "",
 ): boolean {
   if (isCompetitionResultsPage(comp)) return true;
+  if (topicExplicitlyConflictsWithSearch(comp, userTopics)) return true;
   if (isRejectedResult(competitionRecordToSearchResult(comp))) return true;
   if (!isCompetitionUpcoming(comp)) return true;
   if (userTopics.length && !competitionMatchesUserTopics(comp, userTopics, otherText)) return true;
@@ -677,17 +680,7 @@ function applyStrictCompetitionFilter(
   userTopics: string[],
   otherText: string,
 ): Record<string, unknown>[] {
-  return competitions.filter((comp) => {
-    if (isRejectedCompetitionRecord(comp, userTopics, otherText)) return false;
-    const sr = competitionRecordToSearchResult(comp);
-    if (passesStrictCompetitionGate(sr)) return true;
-    const combined = `${sr.title} ${sr.snippet}`;
-    return (
-      KNOWN_COMPETITION_SIGNALS.some((pattern) => pattern.test(combined)) &&
-      !isListOrDirectoryPage(sr) &&
-      !isQuestionOrForumPage(sr)
-    );
-  });
+  return competitions.filter((comp) => !isRejectedCompetitionRecord(comp, userTopics, otherText));
 }
 
 async function discoverFromWeb(
@@ -717,6 +710,10 @@ async function discoverFromWeb(
   const topicLabel = userTopics.filter((t) => t !== "Other" && t !== "Finance").join(" ");
   const primaryQuery = userTopics.includes("Technology")
     ? "USACO hackathon FIRST robotics programming contest registration high school official site:.org"
+    : userTopics.includes("Mathematics")
+    ? "AMC AIME MATHCOUNTS USAMO math competition registration high school official site:.org"
+    : userTopics.includes("Science")
+    ? "Science Olympiad ISEF science fair registration high school official site:.org"
     : buildSearchQuery(inputs, userTopics, true);
   const fallbackQuery = `${topicLabel} student competition registration official site:.org`.trim();
   const queryPlan = [primaryQuery, fallbackQuery].filter(Boolean);
