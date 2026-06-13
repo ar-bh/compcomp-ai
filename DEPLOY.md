@@ -43,17 +43,26 @@ Also run [`supabase-rls.sql`](supabase-rls.sql) if you have not already — it a
 
 ---
 
-## Step 3: Web search API key (recommended)
+## Step 3: API keys explained
 
-The Edge Function searches the web first to find up to 10 competitions. **Serper** (Google results) works best from Supabase servers.
+| Key | Where it lives | What it does |
+|-----|----------------|--------------|
+| **Supabase URL + publishable key** (`config.js`) | Browser (public) | Lets the site read competitions from your database and call the Edge Function. Safe to expose — not a secret. |
+| **`SUPABASE_ACCESS_TOKEN`** | GitHub Actions secret | Lets GitHub deploy your Edge Function to Supabase. Never put this in the frontend. |
+| **`SUPABASE_PROJECT_REF`** | GitHub Actions secret | Tells GitHub which Supabase project to deploy to (`dznlmoglcbcmwxrxybns`). |
+| **`SUPABASE_SERVICE_ROLE_KEY`** | Supabase auto-injects into Edge Functions | Lets the Edge Function read/write the database server-side (insert web results). Never expose in the browser. |
+| **`SERPER_API_KEY`** | Supabase Edge Function secret | Pays for Google web search (1 credit per query). Only used when the database cannot fill all 10 result slots. |
+| **`GEMINI_API_KEY`** | Supabase Edge Function secret (optional) | Free-tier AI that filters search results (news/listicles vs real competitions). Only runs when a web search happens. |
+
+### Serper (web search)
 
 1. Sign up at [serper.dev](https://serper.dev) and copy your API key
 2. Supabase Dashboard → **Edge Functions** → **Secrets**
 3. Add: `SERPER_API_KEY` = your key
 
-Without this key, Bing/DuckDuckGo are tried as fallbacks (often blocked from Supabase — expect 0 results).
+**Credit saving:** The app checks your Supabase database first. Serper runs only if fewer than 10 matches are found. Each search uses at most **2 Serper queries**. Every good web result is saved to the database (`source = web`), so repeat searches reuse cached rows instead of burning credits again.
 
-### Optional — AI result filtering (recommended)
+### Optional — AI result filtering (Gemini)
 
 For better quality (filters out news, listicles, and school announcements):
 
@@ -79,10 +88,10 @@ The Edge Function sends search results to Gemini Flash and keeps only official c
 
 ```text
 Form submit → Edge Function (discover-competitions)
-                ├── Query Supabase competitions
-                ├── Score & rank by profile + topics (typo-tolerant)
-                ├── If < 3 matches → search web → upsert new rows
-                └── Return 3–10 results to the browser
+                ├── Rank matches from Supabase (manual + cached web rows)
+                ├── If 10 found → return (0 Serper credits used)
+                ├── If not → Serper (max 2 queries) → save all good finds to DB
+                └── Return up to 10 results (database first, web fills gaps)
 ```
 
 If the Edge Function is not deployed yet, the site falls back to local matching (database only, no web search).

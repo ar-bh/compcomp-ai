@@ -69,6 +69,11 @@ const KNOWN_COMPETITION_SIGNALS = [
   /\b(register|registration|apply|eligibility|rules and guidelines)\b/i,
 ];
 
+const DB_PREFERRED_COUNT = 5;
+const MAX_SERPER_QUERIES = 2;
+const MAX_WEB_PERSIST = 20;
+const SERPER_RESULTS_PER_QUERY = 10;
+
 interface SearchResult {
   title: string;
   url: string;
@@ -174,7 +179,7 @@ async function searchSerper(query: string, apiKey: string): Promise<SearchResult
       "Content-Type": "application/json",
       "X-API-KEY": apiKey,
     },
-    body: JSON.stringify({ q: query, num: 20 }),
+    body: JSON.stringify({ q: query, num: SERPER_RESULTS_PER_QUERY }),
   });
 
   if (!response.ok) return [];
@@ -490,27 +495,30 @@ async function discoverFromWeb(
   inputs: FormInputs,
   userTopics: string[],
   existingLinks: Set<string>,
-  maxCount: number,
-): Promise<{ imported: Record<string, unknown>[]; searchHits: number; errors: string[] }> {
+  maxDisplay: number,
+): Promise<{ imported: Record<string, unknown>[]; searchHits: number; serperQueries: number; errors: string[] }> {
+  if (maxDisplay <= 0) {
+    return { imported: [], searchHits: 0, serperQueries: 0, errors: [] };
+  }
+
   const topicLabel = userTopics.filter((t) => t !== "Other" && t !== "Finance").join(" ");
   const queries = [
     buildSearchQuery(inputs, userTopics, true),
-    `${topicLabel} national science bowl official site`.trim(),
     `${topicLabel} olympiad registration site:.org`.trim(),
     `${topicLabel} contest registration high school official`.trim(),
-    `site:.gov ${topicLabel} competition students`.trim(),
-    `site:.org ${topicLabel} competition students register`.trim(),
-    `site:.edu ${topicLabel} olympiad`.trim(),
-    `${inputs.otherText || topicLabel} official competition register`.trim(),
-  ];
+  ].slice(0, MAX_SERPER_QUERIES);
   const uniqueQueries = [...new Set(queries.filter(Boolean))];
   const errors: string[] = [];
 
   const allSearchResults: SearchResult[] = [];
   const seenUrls = new Set<string>();
+  let serperQueries = 0;
 
   for (const query of uniqueQueries) {
     try {
+      const serperKey = Deno.env.get("SERPER_API_KEY") ?? "";
+      if (serperKey) serperQueries += 1;
+
       const batch = await runWebSearch(query);
       for (const result of batch) {
         if (!seenUrls.has(result.url)) {
@@ -521,11 +529,11 @@ async function discoverFromWeb(
     } catch (error) {
       errors.push(String(error));
     }
-    if (allSearchResults.length >= 80) break;
+
+    const goodCount = allSearchResults.filter(isOfficialCompetitionResult).length;
+    if (goodCount >= MAX_WEB_PERSIST || goodCount >= maxDisplay) break;
   }
 
-  const imported: Record<string, unknown>[] = [];
-  const importedLinks = new Set<string>();
   let rankedResults = [...allSearchResults]
     .filter(isOfficialCompetitionResult)
     .sort((a, b) => scoreSearchResult(b) - scoreSearchResult(a));
@@ -535,8 +543,12 @@ async function discoverFromWeb(
     rankedResults = await filterWithGemini(rankedResults, geminiKey);
   }
 
+  const displayResults: Record<string, unknown>[] = [];
+  const importedLinks = new Set<string>();
+  let persisted = 0;
+
   for (const result of rankedResults) {
-    if (imported.length >= maxCount) break;
+    if (displayResults.length >= maxDisplay && persisted >= MAX_WEB_PERSIST) break;
     if (importedLinks.has(result.url)) continue;
     if (!isUsableSearchResult(result)) continue;
 
@@ -550,8 +562,8 @@ async function discoverFromWeb(
     );
     if (!competition) continue;
 
-    imported.push(competition);
     importedLinks.add(result.url);
+    persisted += 1;
 
     if (!existingLinks.has(result.url)) {
       const { error } = await supabase.from("competitions").insert(competition);
@@ -566,33 +578,41 @@ async function discoverFromWeb(
         .update({ image: imageUrl, details: competition.details, name: competition.name })
         .eq("link", result.url);
     }
+
+    if (displayResults.length < maxDisplay) {
+      displayResults.push(competition);
+    }
   }
 
-  return { imported: imported.slice(0, maxCount), searchHits: allSearchResults.length, errors };
+  return {
+    imported: displayResults,
+    searchHits: allSearchResults.length,
+    serperQueries,
+    errors,
+  };
 }
 
-function mergeWebPriority(
-  webResults: Record<string, unknown>[],
+function mergeDbPriority(
   dbResults: Record<string, unknown>[],
+  webResults: Record<string, unknown>[],
 ): Record<string, unknown>[] {
   const merged: Record<string, unknown>[] = [];
   const seen = new Set<string>();
 
-  for (const comp of webResults.slice(0, TARGET_RESULTS)) {
+  for (const comp of dbResults) {
+    if (merged.length >= TARGET_RESULTS) break;
+    const id = getCompetitionId(comp);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    merged.push({ ...comp, source: comp.source ?? "manual" });
+  }
+
+  for (const comp of webResults) {
+    if (merged.length >= MAX_RESULTS) break;
     const id = getCompetitionId(comp);
     if (seen.has(id)) continue;
     seen.add(id);
     merged.push({ ...comp, source: "web" });
-  }
-
-  if (merged.length < TARGET_RESULTS) {
-    for (const comp of dbResults) {
-      if (merged.length >= TARGET_RESULTS) break;
-      const id = getCompetitionId(comp);
-      if (seen.has(id)) continue;
-      seen.add(id);
-      merged.push({ ...comp, source: comp.source ?? "manual" });
-    }
   }
 
   return merged.slice(0, MAX_RESULTS);
@@ -642,30 +662,40 @@ Deno.serve(async (req) => {
       (allCompetitions ?? []).map((c) => String(c.link ?? "").trim()).filter(Boolean),
     );
 
-    // STEP 1: Web search FIRST — fill up to 10 from the internet
-    const { imported: webResults, searchHits, errors: webErrors } = await discoverFromWeb(
-      supabase,
-      inputs,
-      userTopics,
-      existingLinks,
-      TARGET_RESULTS,
-    );
+    // STEP 1: Database first (manual + previously cached web rows)
+    const eligibleDb = (allCompetitions ?? []).filter((c) => !isRejectedCompetitionRecord(c));
+    const rankedDb = selectTopCompetitions(rankCompetitions(eligibleDb, inputs));
+    const dbResults = rankedDb.slice(0, TARGET_RESULTS);
+    const needFromWeb = Math.max(0, TARGET_RESULTS - dbResults.length);
 
-    const qualityWebResults = webResults.filter((comp) => !isRejectedCompetitionRecord(comp));
+    // STEP 2: Serper only when DB cannot fill all 10 slots (saves credits)
+    let webResults: Record<string, unknown>[] = [];
+    let searchHits = 0;
+    let serperQueries = 0;
+    let webErrors: string[] = [];
+    let webSearchUsed = false;
 
-    // STEP 2: Curated DB only fills gaps — never old bad web imports
-    const curatedCompetitions = (allCompetitions ?? []).filter(
-      (c) => (c.source ?? "manual") === "manual" && !isRejectedCompetitionRecord(c),
-    );
-    const dbResults = qualityWebResults.length < TARGET_RESULTS
-      ? selectTopCompetitions(rankCompetitions(curatedCompetitions, inputs))
-      : [];
+    if (needFromWeb > 0) {
+      webSearchUsed = true;
+      const webDiscovery = await discoverFromWeb(
+        supabase,
+        inputs,
+        userTopics,
+        existingLinks,
+        needFromWeb,
+      );
+      webResults = webDiscovery.imported.filter((comp) => !isRejectedCompetitionRecord(comp));
+      searchHits = webDiscovery.searchHits;
+      serperQueries = webDiscovery.serperQueries;
+      webErrors = webDiscovery.errors;
+    }
 
-    // STEP 3: Web results first, drop anything that slipped through
-    const competitions = mergeWebPriority(qualityWebResults, dbResults).filter(
+    // STEP 3: DB first, new web results fill remaining slots
+    const competitions = mergeDbPriority(dbResults, webResults).filter(
       (comp) => !isRejectedCompetitionRecord(comp),
     );
 
+    const dbCount = competitions.filter((c) => (c.source ?? "manual") !== "web").length;
     const webCount = competitions.filter((c) => c.source === "web").length;
     const displayTopics = inputs.selectedTopics.filter((t) => t !== "Other").length
       ? inputs.selectedTopics.filter((t) => t !== "Other")
@@ -677,14 +707,18 @@ Deno.serve(async (req) => {
       bannerParts.push(`Showing ${competitions.length} competition${competitions.length === 1 ? "" : "s"}.`);
     }
 
-    if (webCount >= TARGET_RESULTS) {
-      bannerParts.push(`${webCount} found online — showing web results first.`);
+    if (!webSearchUsed && dbCount >= DB_PREFERRED_COUNT) {
+      bannerParts.push(`${dbCount} from our database — no web search needed (Serper credits saved).`);
+    } else if (!webSearchUsed) {
+      bannerParts.push(`${dbCount} from our database.`);
     } else if (webCount > 0) {
-      bannerParts.push(`${webCount} found online (shown first), ${competitions.length - webCount} from our database.`);
+      bannerParts.push(
+        `${dbCount} from database, ${webCount} new online (${serperQueries} Serper ${serperQueries === 1 ? "query" : "queries"}). New finds are saved for next time.`,
+      );
     } else if (searchHits === 0) {
-      bannerParts.push("Web search returned no results — add SERPER_API_KEY (recommended) in Supabase Edge Function secrets.");
+      bannerParts.push("Web search returned no results — add SERPER_API_KEY in Supabase Edge Function secrets.");
     } else {
-      bannerParts.push(`Web search found ${searchHits} pages but none passed filters — showing database results.`);
+      bannerParts.push(`${dbCount} from database. Web search ran but found no new matches — results cached for future searches.`);
     }
 
     if (inferredTopics.length) {
@@ -700,13 +734,14 @@ Deno.serve(async (req) => {
       topics: displayTopics,
       inferredTopics,
       hasExactMatches: competitions.length > 0,
-      webSearchUsed: true,
+      webSearchUsed,
       webImportCount: webCount,
       webSearchHits: searchHits,
+      serperQueries,
       webErrors,
       banner: bannerParts.join(" "),
       sourceCounts: {
-        database: competitions.filter((c) => (c.source ?? "manual") !== "web").length,
+        database: dbCount,
         web: webCount,
       },
     });
