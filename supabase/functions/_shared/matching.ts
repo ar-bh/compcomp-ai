@@ -69,6 +69,11 @@ const TOPIC_FIELD_ALIASES: Record<string, string> = {
   financial: "Finance",
   economics: "Finance",
   stem: "Science",
+  "law & government": "Law & Government",
+  "law and government": "Law & Government",
+  government: "Law & Government",
+  law: "Law & Government",
+  civics: "Law & Government",
 };
 
 const TOPIC_NEGATIVE_KEYWORDS: Record<string, string[]> = {
@@ -79,6 +84,8 @@ const TOPIC_NEGATIVE_KEYWORDS: Record<string, string[]> = {
     "debate", "literature", "humanities", "business", "marketing", "entrepreneurship",
     "deca", "career development", "computing olympiad", "usaco", "programming contest",
     "coding competition", "biology", "chemistry",
+    "mock trial", "courtroom", "litigation", "attorney", "witness", "legal experts",
+    "mock trial championship", "trial championship",
   ],
   Science: ["poetry", "poem", "music", "debate", "history day", "art competition"],
   Technology: ["poetry", "poem", "music", "dance", "history day"],
@@ -135,6 +142,40 @@ const US_STATE_ABBREVS: Record<string, string> = {
   utah: "ut", vermont: "vt", virginia: "va", washington: "wa", "west virginia": "wv",
   wisconsin: "wi", wyoming: "wy",
 };
+
+const AMBIGUOUS_STATE_ABBREVS = new Set([
+  "al", "as", "co", "de", "hi", "id", "in", "la", "ma", "me", "mi", "mo", "ms",
+  "mt", "nc", "nd", "ne", "nh", "nm", "ok", "or", "pa", "ri", "sc", "sd", "tn",
+  "tx", "va", "vt", "wa", "wi", "wv", "wy", "ar", "ca", "ct", "fl", "ga", "ia",
+  "il", "ks", "ky", "md", "mn", "nj", "nv", "ny", "oh", "ut", "ak", "az",
+]);
+
+const REGION_LOCATION_ALIASES: [string, string][] = [
+  ["bay area", "California"],
+  ["san francisco", "California"],
+  ["silicon valley", "California"],
+  ["los angeles", "California"],
+  ["san diego", "California"],
+  ["new york city", "New York"],
+  ["nyc", "New York"],
+  ["greater boston", "Massachusetts"],
+  ["dmv area", "Virginia"],
+  ["sf", "California"],
+];
+
+function matchesStateAbbrev(text: string, abbrev: string): boolean {
+  if (abbrev.length !== 2) {
+    return new RegExp(`\\b${abbrev}\\b`, "i").test(text);
+  }
+  if (!AMBIGUOUS_STATE_ABBREVS.has(abbrev)) {
+    return new RegExp(`\\b${abbrev}\\b`, "i").test(text);
+  }
+  return new RegExp(`(?:^|[\\s,(])${abbrev.toUpperCase()}(?:[\\s,.)]|$)`).test(text);
+}
+
+function matchesStateName(text: string, name: string): boolean {
+  return new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text);
+}
 
 export function levenshtein(a: string, b: string): number {
   const matrix = Array.from({ length: b.length + 1 }, (_, i) => [i]);
@@ -269,7 +310,9 @@ export function competitionMatchesTopic(
 function normalizeLocation(text: string): string {
   let normalized = normalizeInterestText(text);
   for (const [name, abbrev] of Object.entries(US_STATE_ABBREVS)) {
-    normalized = normalized.replace(new RegExp(`\\b${name}\\b`, "g"), abbrev);
+    if (matchesStateName(normalized, name)) {
+      normalized = normalized.replace(new RegExp(`\\b${name}\\b`, "g"), abbrev);
+    }
   }
   return normalized;
 }
@@ -283,7 +326,7 @@ function extractStates(text: string): string[] {
   const normalized = normalizeLocation(text);
   const states = new Set<string>();
   for (const [name, abbrev] of Object.entries(US_STATE_ABBREVS)) {
-    if (new RegExp(`\\b${name}\\b`).test(normalized) || new RegExp(`\\b${abbrev}\\b`).test(normalized)) {
+    if (matchesStateName(normalized, name) || matchesStateAbbrev(text, abbrev)) {
       states.add(abbrev);
     }
   }
@@ -506,9 +549,7 @@ export function scoreCompetition(
     ? (matchedTopics.length > 0 ? 1 : 0)
     : matchedTopics.filter((t) => t !== "Other").length / topicDenominator;
 
-  if (mode === "fallback") {
-    if (topicScore === 0) topicScore = 0.25;
-  } else if (topicScore === 0 && !hasOtherOnly) {
+  if (topicScore === 0 && !hasOtherOnly) {
     return null;
   }
 
@@ -564,15 +605,9 @@ export function scoreCompetition(
 
   if (score <= 0) return null;
 
-  if (!matchedTopics.length && mode !== "fallback") return null;
+  if (!matchedTopics.length) return null;
 
-  const displayTopics = matchedTopics.length
-    ? matchedTopics
-    : mode === "fallback"
-    ? effectiveTopics.slice(0, 1)
-    : [];
-
-  if (!displayTopics.length && mode !== "fallback") return null;
+  const displayTopics = matchedTopics;
 
   return {
     competition: { ...competition, _matchedTopics: displayTopics },
@@ -655,9 +690,25 @@ export function inferCompetitionLocation(
 ): string {
   const text = `${title} ${snippet} ${url}`.toLowerCase();
 
-  for (const [name, abbrev] of Object.entries(US_STATE_ABBREVS)) {
-    if (new RegExp(`\\b${name}\\b`).test(text) || new RegExp(`\\b${abbrev}\\b`).test(text)) {
+  for (const [alias, stateName] of REGION_LOCATION_ALIASES) {
+    if (alias.length <= 3) {
+      if (new RegExp(`\\b${alias}\\b`, "i").test(text)) return stateName;
+    } else if (text.includes(alias)) {
+      return stateName;
+    }
+  }
+
+  for (const [name] of Object.entries(US_STATE_ABBREVS)) {
+    if (matchesStateName(text, name)) {
       return name.charAt(0).toUpperCase() + name.slice(1);
+    }
+  }
+
+  for (const [, abbrev] of Object.entries(US_STATE_ABBREVS)) {
+    if (matchesStateAbbrev(text, abbrev)) {
+      for (const [name, code] of Object.entries(US_STATE_ABBREVS)) {
+        if (code === abbrev) return name.charAt(0).toUpperCase() + name.slice(1);
+      }
     }
   }
 

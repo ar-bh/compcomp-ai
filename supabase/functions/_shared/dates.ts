@@ -96,6 +96,25 @@ function inferDeadlineYear(month: number, text: string, now: Date): number {
   return currentYear;
 }
 
+function parseRegistrationCloseDates(text: string, now: Date): Date[] {
+  const dates: Date[] = [];
+  const normalized = text.replace(/\s+/g, " ");
+  const pattern = new RegExp(
+    `\\b(?:registration\\s+)?will\\s+close\\s+(?:on\\s+)?(?:(?:mon|tues?|wed|thu|fri|sat|sun)[a-z]*\\.?\\s+)?(\\d{1,2})?\\s*(${MONTH_PATTERN})\\.?(?:\\s+(20\\d{2}))?\\b`,
+    "gi",
+  );
+
+  for (const match of normalized.matchAll(pattern)) {
+    const month = parseMonthName(match[2]);
+    if (month === null) continue;
+    const day = match[1] ? Number(match[1]) : 28;
+    const year = match[3] ? Number(match[3]) : inferDeadlineYear(month, normalized, now);
+    dates.push(new Date(year, month, day));
+  }
+
+  return dates.filter((d) => !Number.isNaN(d.getTime()));
+}
+
 function parseDeadlineMentions(text: string, now: Date): Date[] {
   const deadlines: Date[] = [];
   const normalized = text.replace(/\s+/g, " ");
@@ -118,6 +137,7 @@ function parseDeadlineMentions(text: string, now: Date): Date[] {
     }
   }
 
+  deadlines.push(...parseRegistrationCloseDates(text, now));
   return deadlines.filter((d) => !Number.isNaN(d.getTime()));
 }
 
@@ -166,6 +186,11 @@ export function isClosedScheduleText(text: string, now = new Date()): boolean {
   }
 
   const today = startOfDay(now);
+  const closeDates = parseRegistrationCloseDates(scheduleText, now);
+  if (closeDates.some((d) => startOfDay(d) < today)) {
+    return true;
+  }
+
   const explicitDates = parseExplicitDates(scheduleText);
   const deadlineDates = parseDeadlineMentions(scheduleText, now);
   const allDates = [...explicitDates, ...deadlineDates];
@@ -239,6 +264,36 @@ export function isCompetitionUpcoming(
   }
 
   return true;
+}
+
+export function refreshCompetitionSchedule(
+  comp: Record<string, unknown>,
+  now = new Date(),
+): Record<string, unknown> {
+  const scheduleText = getCompetitionScheduleText(comp);
+  if (isClosedScheduleText(scheduleText, now)) {
+    return { ...comp, time: "" };
+  }
+  const inferred = inferTimeLabel(scheduleText, now);
+  if (inferred) return { ...comp, time: inferred };
+  return comp;
+}
+
+export function isCompetitionResultsPage(comp: Record<string, unknown>): boolean {
+  const name = getCompetitionField(comp, ["name", "title"]);
+  const details = getCompetitionField(comp, ["details", "description", "summary"]);
+  const link = getCompetitionField(comp, ["link", "url"]);
+  const combined = `${name} ${details} ${link}`;
+
+  if (/\bcompetition results\b/i.test(combined)) return true;
+  if (/\b(?:exam|contest|tournament|competition)\s+results\b/i.test(combined)) return true;
+  if (/\bresults\s[-–—]/i.test(name)) return true;
+  if (/\b(?:past )?winners\b/i.test(combined) && !/\bregister\b/i.test(combined)) return true;
+  if (/exam\?cmd=/i.test(link)) return true;
+  if (/\bresults\b/i.test(name) && !/\bregister(?:ation)?\s+(?:is\s+)?open\b/i.test(combined)) {
+    return true;
+  }
+  return false;
 }
 
 export function toCompetitionDbRow(comp: Record<string, unknown>): Record<string, unknown> {

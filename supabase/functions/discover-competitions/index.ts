@@ -23,6 +23,8 @@ import {
   inferTimeLabel,
   isCompetitionUpcoming,
   isClosedScheduleText,
+  isCompetitionResultsPage,
+  refreshCompetitionSchedule,
   toCompetitionDbRow,
 } from "../_shared/dates.ts";
 import { ImageAllocator } from "../_shared/images.ts";
@@ -72,6 +74,15 @@ const NEWS_AND_JUNK_PATTERNS = [
   /\b(school district|board of education)\b/i,
   /\|\s*[^|]+\s+high school\s*$/i,
   /\b(campus news|student news|weekly update)\b/i,
+];
+
+const RESULTS_PAGE_PATTERNS = [
+  /\bcompetition results\b/i,
+  /\b(?:exam|contest|tournament|competition)\s+results\b/i,
+  /\bresults\s[-–—]/i,
+  /\bpast winners\b/i,
+  /\bleaderboard\b/i,
+  /exam\?cmd=/i,
 ];
 
 const KNOWN_COMPETITION_SIGNALS = [
@@ -213,10 +224,20 @@ async function searchSerper(query: string, apiKey: string): Promise<SearchResult
     .filter((r: SearchResult) => r.url && isCandidateUrl(r.url));
 }
 
+function isResultsPageResult(result: SearchResult): boolean {
+  const combined = `${result.title} ${result.snippet} ${result.url}`;
+  if (RESULTS_PAGE_PATTERNS.some((pattern) => pattern.test(combined))) return true;
+  if (/\bresults\b/i.test(result.title) && !/\bregister(?:ation)?\s+(?:is\s+)?open\b/i.test(combined)) {
+    return true;
+  }
+  return false;
+}
+
 function isRejectedResult(result: SearchResult): boolean {
   const title = result.title.toLowerCase();
   const combined = `${result.title} ${result.snippet}`.toLowerCase();
 
+  if (isResultsPageResult(result)) return true;
   if (isClosedScheduleText(combined)) return true;
 
   if (LISTICLE_TITLE_PATTERNS.some((pattern) => pattern.test(combined))) {
@@ -525,6 +546,7 @@ function competitionRecordToSearchResult(comp: Record<string, unknown>): SearchR
 }
 
 function isRejectedCompetitionRecord(comp: Record<string, unknown>): boolean {
+  if (isCompetitionResultsPage(comp)) return true;
   if (isRejectedResult(competitionRecordToSearchResult(comp))) return true;
   return !isCompetitionUpcoming(comp);
 }
@@ -757,26 +779,6 @@ function fillFromCachedWeb(
   );
 }
 
-function fillRemainingFromDatabase(
-  eligibleDb: Record<string, unknown>[],
-  inputs: FormInputs,
-  seen: Set<string>,
-  limit: number,
-): Record<string, unknown>[] {
-  if (limit <= 0) return [];
-
-  const profileSeed = buildProfileSeed(inputs);
-  return pickWithProfileVariety(
-    eligibleDb,
-    inputs,
-    "fallback",
-    limit,
-    seen,
-    profileSeed,
-    { isAlternative: true },
-  );
-}
-
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -827,8 +829,14 @@ Deno.serve(async (req) => {
 
     // STEP 1: Curated manual rows first (profile-shuffled), cached web held back for variety
     const eligibleDb = allCompetitions
-      .filter((c) => !isRejectedResult(competitionRecordToSearchResult(c)) && isCompetitionUpcoming(c))
-      .map((c) => (String(c.source ?? "manual") === "web" ? refreshWebRowMetadata(c) : c));
+      .filter((c) => !isRejectedResult(competitionRecordToSearchResult(c)))
+      .map((c) => {
+        const refreshed = String(c.source ?? "manual") === "web"
+          ? refreshWebRowMetadata(c)
+          : c;
+        return refreshCompetitionSchedule(refreshed);
+      })
+      .filter((c) => !isCompetitionResultsPage(c) && isCompetitionUpcoming(c));
 
     const manualEligible = eligibleDb.filter((c) => String(c.source ?? "manual") !== "web");
     const cachedWebEligible = eligibleDb.filter((c) => String(c.source) === "web");
@@ -882,17 +890,6 @@ Deno.serve(async (req) => {
       TARGET_RESULTS - combinedDb.length,
     );
     combinedDb = [...combinedDb, ...cachedFill];
-
-    // STEP 4: Last resort fallback from anything eligible
-    if (combinedDb.length < TARGET_RESULTS) {
-      const fallbackFill = fillRemainingFromDatabase(
-        eligibleDb,
-        inputs,
-        seenIds,
-        TARGET_RESULTS - combinedDb.length,
-      );
-      combinedDb = [...combinedDb, ...fallbackFill];
-    }
 
     const strictCount = combinedDb.filter((c) => !c._isAlternative).length;
     const alternativeCount = combinedDb.filter((c) => c._isAlternative).length;
