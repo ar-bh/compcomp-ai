@@ -31,6 +31,12 @@ import {
 } from "../_shared/dates.ts";
 import { ImageAllocator } from "../_shared/images.ts";
 import { filterCompetitionsWithGemini } from "../_shared/gemini-filter.ts";
+import {
+  checkGeminiQuota,
+  quotaSkipMessage,
+  recordGemini429,
+  reserveGeminiSlot,
+} from "../_shared/gemini-quota.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -666,6 +672,24 @@ function isRejectedCompetitionRecord(
   return false;
 }
 
+function applyStrictCompetitionFilter(
+  competitions: Record<string, unknown>[],
+  userTopics: string[],
+  otherText: string,
+): Record<string, unknown>[] {
+  return competitions.filter((comp) => {
+    if (isRejectedCompetitionRecord(comp, userTopics, otherText)) return false;
+    const sr = competitionRecordToSearchResult(comp);
+    if (passesStrictCompetitionGate(sr)) return true;
+    const combined = `${sr.title} ${sr.snippet}`;
+    return (
+      KNOWN_COMPETITION_SIGNALS.some((pattern) => pattern.test(combined)) &&
+      !isListOrDirectoryPage(sr) &&
+      !isQuestionOrForumPage(sr)
+    );
+  });
+}
+
 async function discoverFromWeb(
   supabase: ReturnType<typeof createClient>,
   inputs: FormInputs,
@@ -1018,21 +1042,30 @@ Deno.serve(async (req) => {
         .map((comp) => assignCompetitionImage(comp, imageAllocator)),
     ).filter((comp) => !isRejectedCompetitionRecord(comp, userTopics, inputs.otherText));
 
+    let geminiSkippedReason = "";
+
     if (geminiKey && competitions.length) {
-      const finalGemini = await filterCompetitionsWithGemini(competitions, geminiKey, userTopics);
-      if (finalGemini.applied) {
-        competitions = finalGemini.items.filter(
-          (comp) => !isRejectedCompetitionRecord(comp, userTopics, inputs.otherText),
-        );
-        geminiFilterUsed = true;
-        geminiNote = finalGemini.note;
-      } else if (finalGemini.note) {
-        geminiNote = finalGemini.note;
-        competitions = competitions.filter(
-          (comp) =>
-            !isRejectedCompetitionRecord(comp, userTopics, inputs.otherText) &&
-            passesStrictCompetitionGate(competitionRecordToSearchResult(comp)),
-        );
+      const quota = await checkGeminiQuota(supabase);
+
+      if (quota.allowed && await reserveGeminiSlot(supabase)) {
+        const finalGemini = await filterCompetitionsWithGemini(competitions, geminiKey, userTopics);
+
+        if (finalGemini.rateLimited) {
+          await recordGemini429(supabase);
+          geminiSkippedReason = "cooldown";
+          competitions = applyStrictCompetitionFilter(competitions, userTopics, inputs.otherText);
+        } else if (finalGemini.applied) {
+          competitions = finalGemini.items.filter(
+            (comp) => !isRejectedCompetitionRecord(comp, userTopics, inputs.otherText),
+          );
+          geminiFilterUsed = true;
+        } else {
+          if (finalGemini.note) geminiNote = finalGemini.note;
+          competitions = applyStrictCompetitionFilter(competitions, userTopics, inputs.otherText);
+        }
+      } else {
+        geminiSkippedReason = quota.reason;
+        competitions = applyStrictCompetitionFilter(competitions, userTopics, inputs.otherText);
       }
     }
 
@@ -1071,16 +1104,14 @@ Deno.serve(async (req) => {
 
     if (geminiFilterUsed) {
       bannerParts.push("Gemini AI verified results — listicles, threads, and outdated events removed.");
-    } else if (geminiKey && geminiNote.includes("429")) {
-      bannerParts.push("Gemini rate limit hit — using rule filters. Wait ~60 seconds before searching again.");
-    } else if (geminiKey) {
-      bannerParts.push("Gemini could not verify results — showing strict rule-filtered matches only.");
-    } else {
-      bannerParts.push("Add GEMINI_API_KEY to filter listicles, threads, and outdated competitions.");
-    }
-
-    if (geminiNote && !geminiFilterUsed) {
+    } else if (geminiSkippedReason) {
+      const skipMsg = quotaSkipMessage(geminiSkippedReason as "cooldown" | "spacing" | "daily_limit" | "no_table" | "ok");
+      if (skipMsg) bannerParts.push(skipMsg);
+    } else if (geminiKey && geminiNote) {
+      bannerParts.push("Strict rule filters applied.");
       bannerParts.push(geminiNote);
+    } else if (geminiKey) {
+      bannerParts.push("Strict rule filters applied — no AI call needed.");
     }
 
     if (inferredTopics.length) {
