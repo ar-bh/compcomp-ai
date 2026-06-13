@@ -122,24 +122,27 @@ async function searchBing(query: string): Promise<SearchResult[]> {
   return results;
 }
 
-async function searchBrave(query: string, apiKey: string): Promise<SearchResult[]> {
-  const url = new URL("https://api.search.brave.com/res/v1/web/search");
-  url.searchParams.set("q", query);
-  url.searchParams.set("count", "20");
-
-  const response = await fetch(url.toString(), {
-    headers: { Accept: "application/json", "X-Subscription-Token": apiKey },
+async function searchSerper(query: string, apiKey: string): Promise<SearchResult[]> {
+  const response = await fetch("https://google.serper.dev/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-API-KEY": apiKey,
+    },
+    body: JSON.stringify({ q: query, num: 20 }),
   });
 
   if (!response.ok) return [];
 
   const data = await response.json();
-  const results = data?.web?.results ?? [];
-  return results.map((r: { title?: string; url?: string; description?: string }) => ({
-    title: r.title ?? "",
-    url: r.url ?? "",
-    snippet: r.description ?? "",
-  })).filter((r: SearchResult) => r.url && isCandidateUrl(r.url));
+  const results = data?.organic ?? [];
+  return results
+    .map((r: { title?: string; link?: string; snippet?: string }) => ({
+      title: r.title ?? "",
+      url: r.link ?? "",
+      snippet: r.snippet ?? "",
+    }))
+    .filter((r: SearchResult) => r.url && isCandidateUrl(r.url));
 }
 
 async function searchDuckDuckGo(query: string): Promise<SearchResult[]> {
@@ -176,10 +179,10 @@ async function searchDuckDuckGo(query: string): Promise<SearchResult[]> {
 }
 
 async function runWebSearch(query: string): Promise<SearchResult[]> {
-  const braveKey = Deno.env.get("BRAVE_SEARCH_API_KEY") ?? "";
-  if (braveKey) {
-    const braveResults = await searchBrave(query, braveKey);
-    if (braveResults.length) return braveResults;
+  const serperKey = Deno.env.get("SERPER_API_KEY") ?? "";
+  if (serperKey) {
+    const serperResults = await searchSerper(query, serperKey);
+    if (serperResults.length) return serperResults;
   }
 
   const bingResults = await searchBing(query);
@@ -431,7 +434,7 @@ Deno.serve(async (req) => {
     } else if (webCount > 0) {
       bannerParts.push(`${webCount} found online (shown first), ${competitions.length - webCount} from our database.`);
     } else if (searchHits === 0) {
-      bannerParts.push("Web search returned no results — add BRAVE_SEARCH_API_KEY in Supabase Edge Function secrets.");
+      bannerParts.push("Web search returned no results — add SERPER_API_KEY (recommended) in Supabase Edge Function secrets.");
     } else {
       bannerParts.push(`Web search found ${searchHits} pages but none passed filters — showing database results.`);
     }

@@ -43,17 +43,15 @@ Also run [`supabase-rls.sql`](supabase-rls.sql) if you have not already — it a
 
 ---
 
-## Step 3: Optional — better web search
+## Step 3: Web search API key (recommended)
 
-When fewer than 3 competitions match in the database, the Edge Function searches the internet for more.
+The Edge Function searches the web first to find up to 10 competitions. **Serper** (Google results) works best from Supabase servers.
 
-For more reliable search results:
-
-1. Sign up for a free API key at [Brave Search API](https://brave.com/search/api/)
+1. Sign up at [serper.dev](https://serper.dev) and copy your API key
 2. Supabase Dashboard → **Edge Functions** → **Secrets**
-3. Add: `BRAVE_SEARCH_API_KEY` = your key
+3. Add: `SERPER_API_KEY` = your key
 
-Without this key, DuckDuckGo is used as a fallback (less reliable).
+Without this key, Bing/DuckDuckGo are tried as fallbacks (often blocked from Supabase — expect 0 results).
 
 ---
 
@@ -87,7 +85,7 @@ If the Edge Function is not deployed yet, the site falls back to local matching 
 |---------|-----|
 | "Could not reach Supabase" | Check `config.js` URL and API key match your project |
 | Edge Function 404 | Push to GitHub and confirm Actions deploy succeeded |
-| Fewer than 3 results | Broaden topics/location; add `BRAVE_SEARCH_API_KEY` |
+| Fewer than 3 results | Broaden topics/location; add `SERPER_API_KEY` |
 | Duplicate link index skipped | Remove duplicate `link` values in Table Editor, re-run migration |
 
 ---
