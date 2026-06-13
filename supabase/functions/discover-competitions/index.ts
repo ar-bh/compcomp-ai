@@ -2,6 +2,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import {
   FormInputs,
   MAX_RESULTS,
+  MAX_SUGGESTED_RESULTS,
   TARGET_RESULTS,
   getCompetitionId,
   getUserSearchTopics,
@@ -1376,31 +1377,30 @@ Deno.serve(async (req) => {
     }
 
     const primaryIds = new Set(competitions.map((comp) => getCompetitionId(comp)));
-    const suggestedPool = allCompetitions
-      .map((c) => String(c.source ?? "manual") === "web" ? refreshWebRowMetadata(c) : c)
-      .map((c) => refreshCompetitionSchedule(c))
-      .filter((c) => !primaryIds.has(getCompetitionId(c)))
-      .filter((c) => !isCompetitionResultsPage(c) && isCompetitionUpcoming(c))
-      .filter((c) => !isRejectedResult(competitionRecordToSearchResult(c)));
+    const leftoverWeb = dedupeCompetitionResults([
+      ...webResults.filter((comp) => !primaryIds.has(getCompetitionId(comp))),
+      ...webSuggested.filter((comp) => !primaryIds.has(getCompetitionId(comp))),
+    ]);
+
+    const suggestedPool = dedupeCompetitionResults([
+      ...leftoverWeb,
+      ...allCompetitions
+        .map((c) => String(c.source ?? "manual") === "web" ? refreshWebRowMetadata(c) : c)
+        .map((c) => refreshCompetitionSchedule(c))
+        .filter((c) => !primaryIds.has(getCompetitionId(c)))
+        .filter((c) => !isCompetitionResultsPage(c) && isCompetitionUpcoming(c))
+        .filter((c) => !isRejectedResult(competitionRecordToSearchResult(c))),
+    ]);
 
     let suggestedCompetitions = pickSuggestedCompetitions(
       suggestedPool,
       inputs,
       primaryIds,
-      0,
+      MAX_SUGGESTED_RESULTS,
     );
 
-    const extraWebSuggested = webSuggested.filter(
-      (comp) =>
-        !primaryIds.has(getCompetitionId(comp)) &&
-        passesSuggestedRelevanceGate(comp, inputs, userTopics),
-    );
-    suggestedCompetitions = dedupeCompetitionResults([
-      ...suggestedCompetitions,
-      ...extraWebSuggested,
-    ])
+    suggestedCompetitions = suggestedCompetitions
       .filter((comp) => !primaryIds.has(getCompetitionId(comp)))
-      .filter((comp) => passesSuggestedRelevanceGate(comp, inputs, userTopics))
       .map((comp) => assignCompetitionImage(comp, imageAllocator));
 
     const dbCount = competitions.filter((c) => c._fromDatabase === true).length;

@@ -628,12 +628,38 @@ export function passesSuggestedRelevanceGate(
   }
 
   const searchTopics = userTopics.filter((t) => t !== "Other");
+  const searchRelevance = scoreSearchRelevance(competition, inputs);
+
+  if (hasActiveSearchQuery(inputs)) {
+    if (searchRelevance >= 0.35) return true;
+
+    const phrase = getEffectiveSearchText(inputs);
+    const tokens = normalizeInterestText(phrase).split(" ").filter((word) => word.length >= 3);
+    const compText = getCompetitionSearchText(competition);
+    const hasTokenHit = tokens.some((token) => textMatchesKeyword(compText, token));
+
+    if (!hasTokenHit && searchRelevance < 0.2) return false;
+
+    const inferredFromSearch = inferTopicsFromOtherText(phrase);
+    if (inferredFromSearch.some((topic) => competitionMatchesTopic(competition, topic, inputs.otherText))) {
+      return true;
+    }
+
+    if (searchTopics.length) {
+      const matched = getMatchedTopicsForCompetition(competition, searchTopics, inputs.otherText);
+      if (matched.some((t) => searchTopics.includes(t)) && (hasTokenHit || searchRelevance > 0)) {
+        return true;
+      }
+    }
+
+    return hasTokenHit || searchRelevance > 0;
+  }
 
   if (userTopics.includes("Other") && inputs.otherText) {
     return competitionMatchesOtherText(competition, inputs.otherText);
   }
 
-  if (!searchTopics.length) return true;
+  if (!searchTopics.length) return searchRelevance > 0;
 
   const searchText = getCompetitionSearchText(competition);
   const matched = getMatchedTopicsForCompetition(competition, searchTopics, inputs.otherText);
@@ -718,13 +744,17 @@ export function scoreCompetition(
     : matchedTopics.filter((t) => t !== "Other").length / topicDenominator;
 
   if (topicScore === 0 && !hasOtherOnly) {
-    if (hasActiveSearchQuery(inputs) && competitionMatchesOtherText(competition, inputs.otherText)) {
+    const matchText = getEffectiveSearchText(inputs);
+    if (hasActiveSearchQuery(inputs) && matchText && competitionMatchesOtherText(competition, matchText)) {
       topicScore = effectiveTopics.length ? 0.9 : 1;
     } else {
       return null;
     }
-  } else if (hasActiveSearchQuery(inputs) && competitionMatchesOtherText(competition, inputs.otherText)) {
-    topicScore = Math.min(1, topicScore + 0.25);
+  } else if (hasActiveSearchQuery(inputs)) {
+    const matchText = getEffectiveSearchText(inputs);
+    if (matchText && competitionMatchesOtherText(competition, matchText)) {
+      topicScore = Math.min(1, topicScore + 0.25);
+    }
   }
 
   let formatScore = scoreFormat(competition, inputs.format);
@@ -832,8 +862,43 @@ export function buildProfileSeed(inputs: FormInputs): string {
     inputs.location,
     inputs.format,
     inputs.selectedTopics.join("|"),
+    inputs.searchQuery,
     inputs.otherText,
   ].join("::");
+}
+
+/** 0–1: how closely a competition matches the user's search box / interest text. */
+export function scoreSearchRelevance(
+  competition: Record<string, unknown>,
+  inputs: FormInputs,
+): number {
+  const searchQuery = String(inputs.searchQuery ?? "").trim();
+  const otherText = String(inputs.otherText ?? "").trim();
+
+  if (searchQuery && competitionMatchesOtherText(competition, searchQuery)) return 1;
+  if (otherText && competitionMatchesOtherText(competition, otherText)) return 0.92;
+
+  const phrase = searchQuery || otherText;
+  if (!phrase) return 0;
+
+  const tokens = normalizeInterestText(phrase).split(" ").filter((word) => word.length >= 3);
+  if (!tokens.length) return 0;
+
+  const compText = getCompetitionSearchText(competition);
+  const link = normalizeInterestText(getCompetitionField(competition, ["link", "url"]));
+  let hits = 0;
+  for (const token of tokens) {
+    if (
+      textMatchesKeyword(compText, token) ||
+      textMatchesKeyword(link, token) ||
+      normalizeInterestText(getCompetitionField(competition, ["name", "title"])).split(" ")
+        .some((nameToken) => fuzzyTokenMatch(token, nameToken))
+    ) {
+      hits += 1;
+    }
+  }
+
+  return Math.min(0.85, (hits / tokens.length) * 0.85);
 }
 
 function seededUnit(seed: string, id: string): number {
@@ -1015,58 +1080,63 @@ export function pickSuggestedCompetitions(
   pool: Record<string, unknown>[],
   inputs: FormInputs,
   excludeIds: Set<string>,
-  limit = 0,
+  limit = MAX_SUGGESTED_RESULTS,
 ): Record<string, unknown>[] {
   const userTopics = getUserSearchTopics(inputs);
+  const profileSeed = buildProfileSeed(inputs);
   const byId = new Map<string, { competition: Record<string, unknown>; score: number }>();
 
-  const ingestRanked = (ranked: ScoredCompetition[], bonus: number) => {
-    for (const { competition, score } of ranked) {
-      const id = getCompetitionId(competition);
-      if (excludeIds.has(id)) continue;
-      if (!passesSuggestedRelevanceGate(competition, inputs, userTopics)) continue;
-
-      const prev = byId.get(id);
-      byId.set(id, {
-        competition: {
-          ...competition,
-          _isSuggested: true,
-          _matchedTopics: getMatchedTopicsForCompetition(competition, userTopics, inputs.otherText),
-        },
-        score: Math.max(prev?.score ?? 0, score + bonus),
-      });
-    }
-  };
-
-  ingestRanked(rankCompetitions(pool, inputs, "relaxed"), 0.12);
-  ingestRanked(rankCompetitions(pool, inputs, "fallback"), 0.06);
-
-  for (const competition of pool) {
+  const addCandidate = (competition: Record<string, unknown>, baseScore: number) => {
     const id = getCompetitionId(competition);
-    if (excludeIds.has(id) || byId.has(id)) continue;
-    if (!passesSuggestedRelevanceGate(competition, inputs, userTopics)) continue;
+    if (excludeIds.has(id)) return;
+    if (!passesSuggestedRelevanceGate(competition, inputs, userTopics)) return;
 
+    const searchBoost = scoreSearchRelevance(competition, inputs) * 0.55;
     const matched = getMatchedTopicsForCompetition(competition, userTopics, inputs.otherText);
-    let score = 0.25;
-    if (matched.some((t) => userTopics.includes(t) && t !== "Other")) score += 0.4;
+    let score = baseScore + searchBoost;
+    if (matched.some((t) => userTopics.includes(t) && t !== "Other")) score += 0.25;
     if (inputs.location && locationMatchesUser(competition, inputs.location, inputs.format)) {
-      score += 0.15;
+      score += 0.12;
     }
-    if (inputs.format && scoreFormat(competition, inputs.format) > 0) score += 0.1;
-    if (String(competition.source ?? "manual") === "manual") score += 0.05;
+    if (inputs.format && scoreFormat(competition, inputs.format) > 0) score += 0.08;
+    if (String(competition.source ?? "manual") === "web") score += 0.1;
 
+    const prev = byId.get(id);
     byId.set(id, {
       competition: {
         ...competition,
         _isSuggested: true,
-        _matchedTopics: matched.length ? matched : [getCompetitionField(competition, ["topic"]) || "General"],
+        _matchedTopics: matched.length
+          ? matched
+          : [getCompetitionField(competition, ["topic"]) || "General"],
+        _searchRelevance: searchBoost,
       },
-      score,
+      score: Math.max(prev?.score ?? 0, score),
     });
+  };
+
+  const ingestRanked = (ranked: ScoredCompetition[], bonus: number) => {
+    for (const { competition, score } of ranked) {
+      addCandidate(competition, score + bonus);
+    }
+  };
+
+  ingestRanked(sortScoredWithProfileVariety(rankCompetitions(pool, inputs, "strict"), profileSeed), 0.18);
+  ingestRanked(sortScoredWithProfileVariety(rankCompetitions(pool, inputs, "relaxed"), profileSeed), 0.12);
+  ingestRanked(sortScoredWithProfileVariety(rankCompetitions(pool, inputs, "fallback"), profileSeed), 0.06);
+
+  for (const competition of pool) {
+    const id = getCompetitionId(competition);
+    if (excludeIds.has(id) || byId.has(id)) continue;
+    addCandidate(competition, 0.2);
   }
 
   const picked = [...byId.values()]
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => {
+      if (Math.abs(b.score - a.score) > 0.02) return b.score - a.score;
+      return seededUnit(profileSeed, getCompetitionId(b.competition)) -
+        seededUnit(profileSeed, getCompetitionId(a.competition));
+    })
     .map((item) => item.competition);
 
   return limit > 0 ? picked.slice(0, limit) : picked;
