@@ -35,6 +35,8 @@ const DiscoveryMatching = (() => {
     science: "Science", sciences: "Science", technology: "Technology", tech: "Technology",
     mathematics: "Mathematics", math: "Mathematics", maths: "Mathematics",
     arts: "Arts", art: "Arts", music: "Arts", poetry: "Arts", drama: "Arts",
+    "art & creative writing": "Arts", "history & humanities": "Arts", history: "Arts",
+    humanities: "Arts",
     finance: "Finance", financial: "Finance", economics: "Finance", stem: "Science",
   };
 

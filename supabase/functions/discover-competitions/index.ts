@@ -10,7 +10,6 @@ import {
   inferTopicsFromInputs,
   locationMatchesUser,
   rankCompetitions,
-  scoreFormat,
   selectTopCompetitions,
   textMatchesKeyword,
 } from "../_shared/matching.ts";
@@ -202,16 +201,17 @@ function buildCompetitionFromSearchResult(
   result: SearchResult,
   inputs: FormInputs,
   userTopics: string[],
+  strictTopic = true,
 ): Record<string, unknown> | null {
   const combinedText = `${result.title} ${result.snippet}`;
-  const matchedTopic = inferBestTopicForUser(combinedText, userTopics);
+  let topic = inferBestTopicForUser(combinedText, userTopics);
 
-  if (!matchedTopic && userTopics.length > 0 && !userTopics.includes("Other")) {
+  if (!topic && strictTopic && userTopics.length > 0 && !userTopics.includes("Other")) {
     return null;
   }
 
-  const topic = matchedTopic ?? userTopics[0] ?? "Science";
-  const format = inputs.format || inferFormatFromText(combinedText);
+  topic = topic ?? userTopics[0] ?? "Science";
+  const format = inputs.format || inferFormatFromText(combinedText) || "online";
 
   return {
     name: result.title || "Competition",
@@ -220,12 +220,36 @@ function buildCompetitionFromSearchResult(
     image: "",
     topic,
     format,
-    location: inputs.location || "",
+    location: inputs.location || "Online",
     grade: inputs.grade ? `Grades ${inputs.grade}` : "",
     age: inputs.age || "",
     source: "web",
     _matchedTopics: [topic],
   };
+}
+
+function isUsableSearchResult(result: SearchResult, userTopics: string[], strict: boolean): boolean {
+  if (!result.url || !result.title || result.title.length < 4) return false;
+  if (!isCandidateUrl(result.url)) return false;
+
+  const combined = `${result.title} ${result.snippet}`.toLowerCase();
+  if (looksLikeCompetition(combined)) return true;
+
+  if (strict) return false;
+
+  const topicWords = userTopics
+    .filter((t) => t !== "Other" && t !== "Finance")
+    .map((t) => t.toLowerCase());
+
+  if (topicWords.some((t) => combined.includes(t))) return true;
+
+  return (
+    combined.includes("student") ||
+    combined.includes("high school") ||
+    combined.includes("youth") ||
+    combined.includes("olympiad") ||
+    combined.includes("contest")
+  );
 }
 
 async function discoverFromWeb(
@@ -235,11 +259,17 @@ async function discoverFromWeb(
   existingLinks: Set<string>,
   maxCount: number,
 ): Promise<{ imported: Record<string, unknown>[]; searchHits: number; errors: string[] }> {
+  const topicLabel = userTopics.filter((t) => t !== "Other" && t !== "Finance").join(" ");
   const queries = [
     buildSearchQuery(inputs, userTopics),
-    `${userTopics.join(" ")} student competition ${inputs.location}`.trim(),
-    `${userTopics.join(" ")} high school contest ${inputs.grade ? `grade ${inputs.grade}` : ""}`.trim(),
-    `youth ${userTopics[0] ?? "STEM"} olympiad competition`,
+    `${topicLabel} student competition ${inputs.location}`.trim(),
+    `${topicLabel} high school contest`.trim(),
+    `${topicLabel} olympiad youth`.trim(),
+    `${topicLabel} scholarship competition students`.trim(),
+    `site:.edu ${topicLabel} competition students`.trim(),
+    `site:.org ${topicLabel} contest high school`.trim(),
+    `${inputs.otherText || topicLabel} student competition`.trim(),
+    `${topicLabel} math science contest ${inputs.grade ? `grade ${inputs.grade}` : ""}`.trim(),
   ];
   const uniqueQueries = [...new Set(queries.filter(Boolean))];
   const errors: string[] = [];
@@ -259,56 +289,66 @@ async function discoverFromWeb(
     } catch (error) {
       errors.push(String(error));
     }
-    if (allSearchResults.length >= 50) break;
+    if (allSearchResults.length >= 80) break;
   }
 
   const imported: Record<string, unknown>[] = [];
+  const importedLinks = new Set<string>();
 
-  for (const result of allSearchResults) {
-    if (imported.length >= maxCount) break;
-    if (existingLinks.has(result.url)) continue;
+  const tryImport = async (strict: boolean) => {
+    for (const result of allSearchResults) {
+      if (imported.length >= maxCount) break;
+      if (importedLinks.has(result.url)) continue;
 
-    const combined = `${result.title} ${result.snippet}`;
-    if (!looksLikeCompetition(combined)) continue;
+      if (!isUsableSearchResult(result, userTopics, strict)) continue;
 
-    const competition = buildCompetitionFromSearchResult(result, inputs, userTopics);
-    if (!competition) continue;
+      const competition = buildCompetitionFromSearchResult(result, inputs, userTopics, strict);
+      if (!competition) continue;
 
-    if (inputs.format && scoreFormat(competition, inputs.format) === 0) continue;
-    if (inputs.location && !locationMatchesUser(competition, inputs.location, inputs.format)) continue;
+      imported.push(competition);
+      importedLinks.add(result.url);
 
-    const { error } = await supabase.from("competitions").insert(competition);
-    if (error && !String(error.message).toLowerCase().includes("duplicate")) {
-      errors.push(error.message);
+      if (!existingLinks.has(result.url)) {
+        const { error } = await supabase.from("competitions").insert(competition);
+        if (error && !String(error.message).toLowerCase().includes("duplicate")) {
+          errors.push(error.message);
+        } else {
+          existingLinks.add(result.url);
+        }
+      }
     }
+  };
 
-    imported.push(competition);
-    existingLinks.add(result.url);
+  await tryImport(true);
+  if (imported.length < maxCount) {
+    await tryImport(false);
   }
 
-  return { imported, searchHits: allSearchResults.length, errors };
+  return { imported: imported.slice(0, maxCount), searchHits: allSearchResults.length, errors };
 }
 
-function mergeWebFirstThenDb(
+function mergeWebPriority(
   webResults: Record<string, unknown>[],
   dbResults: Record<string, unknown>[],
 ): Record<string, unknown>[] {
   const merged: Record<string, unknown>[] = [];
   const seen = new Set<string>();
 
-  for (const comp of webResults) {
+  for (const comp of webResults.slice(0, TARGET_RESULTS)) {
     const id = getCompetitionId(comp);
     if (seen.has(id)) continue;
     seen.add(id);
-    merged.push(comp);
+    merged.push({ ...comp, source: "web" });
   }
 
-  for (const comp of dbResults) {
-    if (merged.length >= TARGET_RESULTS) break;
-    const id = getCompetitionId(comp);
-    if (seen.has(id)) continue;
-    seen.add(id);
-    merged.push(comp);
+  if (merged.length < TARGET_RESULTS) {
+    for (const comp of dbResults) {
+      if (merged.length >= TARGET_RESULTS) break;
+      const id = getCompetitionId(comp);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      merged.push({ ...comp, source: comp.source ?? "manual" });
+    }
   }
 
   return merged.slice(0, MAX_RESULTS);
@@ -358,7 +398,7 @@ Deno.serve(async (req) => {
       (allCompetitions ?? []).map((c) => String(c.link ?? "").trim()).filter(Boolean),
     );
 
-    // STEP 1: Web search FIRST (always)
+    // STEP 1: Web search FIRST — fill up to 10 from the internet
     const { imported: webResults, searchHits, errors: webErrors } = await discoverFromWeb(
       supabase,
       inputs,
@@ -367,11 +407,13 @@ Deno.serve(async (req) => {
       TARGET_RESULTS,
     );
 
-    // STEP 2: Database matches (strict topic filter)
-    const dbResults = selectTopCompetitions(rankCompetitions(allCompetitions ?? [], inputs));
+    // STEP 2: Database only fills gaps when web has fewer than 10
+    const dbResults = webResults.length < TARGET_RESULTS
+      ? selectTopCompetitions(rankCompetitions(allCompetitions ?? [], inputs))
+      : [];
 
-    // STEP 3: Merge — web results appear first, DB fills the rest
-    const competitions = mergeWebFirstThenDb(webResults, dbResults);
+    // STEP 3: Web results always shown first
+    const competitions = mergeWebPriority(webResults, dbResults);
 
     const webCount = competitions.filter((c) => c.source === "web").length;
     const displayTopics = inputs.selectedTopics.filter((t) => t !== "Other").length
@@ -384,12 +426,14 @@ Deno.serve(async (req) => {
       bannerParts.push(`Showing ${competitions.length} competition${competitions.length === 1 ? "" : "s"}.`);
     }
 
-    if (webCount > 0) {
-      bannerParts.push(`${webCount} found online (shown first).`);
+    if (webCount >= TARGET_RESULTS) {
+      bannerParts.push(`${webCount} found online — showing web results first.`);
+    } else if (webCount > 0) {
+      bannerParts.push(`${webCount} found online (shown first), ${competitions.length - webCount} from our database.`);
     } else if (searchHits === 0) {
-      bannerParts.push("Web search returned no results — add BRAVE_SEARCH_API_KEY in Supabase for better search.");
+      bannerParts.push("Web search returned no results — add BRAVE_SEARCH_API_KEY in Supabase Edge Function secrets.");
     } else {
-      bannerParts.push("Web search ran but no new online matches passed filters.");
+      bannerParts.push(`Web search found ${searchHits} pages but none passed filters — showing database results.`);
     }
 
     if (inferredTopics.length) {
