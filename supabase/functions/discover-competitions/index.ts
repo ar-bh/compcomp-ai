@@ -181,7 +181,7 @@ const TARGET_WEB_SLOTS = 3;
 const MAX_SERPER_QUERIES = 1;
 const MAX_SERPER_QUERIES_WHEN_EMPTY = 2;
 const MAX_WEB_PERSIST = 12;
-const MAX_SUGGESTED_WEB = 40;
+const MAX_SUGGESTED_WEB = 18;
 const SERPER_RESULTS_PER_QUERY = 8;
 
 interface SearchResult {
@@ -1022,10 +1022,11 @@ async function discoverFromWeb(
     }
     if (!competition) continue;
     if (!passesPrimaryQualityGate(competition)) {
-      const routeToSuggested = isSuggestedOnlyResult(result) ||
-        isListOrDirectoryPage(result) ||
-        (Boolean(searchPhrase) && matchesSearch);
-      if (routeToSuggested && suggestedWeb.length < MAX_SUGGESTED_WEB) {
+      if (
+        suggestedWeb.length < MAX_SUGGESTED_WEB &&
+        passesSuggestedRelevanceGate(competition, inputs, userTopics) &&
+        (isSuggestedOnlyResult(result) || isListOrDirectoryPage(result))
+      ) {
         suggestedWeb.push({
           ...competition,
           image: imageUrl || faviconForUrl(result.url),
@@ -1111,9 +1112,7 @@ async function discoverFromWeb(
       competition = buildNamedSearchFallbackResult(result, inputs, imageUrl);
     }
     if (!competition) continue;
-    if (!matchesSuggestedSearch && !passesSuggestedRelevanceGate(competition, inputs, userTopics)) {
-      continue;
-    }
+    if (!passesSuggestedRelevanceGate(competition, inputs, userTopics)) continue;
 
     suggestedWeb.push({
       ...competition,
@@ -1138,7 +1137,10 @@ async function discoverFromWeb(
       const competition = buildNamedSearchFallbackResult(result, inputs, imageUrl);
 
       if (!passesPrimaryQualityGate(competition)) {
-        if (suggestedWeb.length < MAX_SUGGESTED_WEB) {
+        if (
+          suggestedWeb.length < MAX_SUGGESTED_WEB &&
+          passesSuggestedRelevanceGate(competition, inputs, userTopics)
+        ) {
           suggestedWeb.push({
             ...competition,
             image: imageUrl || faviconForUrl(result.url),
@@ -1207,6 +1209,7 @@ async function discoverFromWeb(
         false,
       ) ?? buildNamedSearchFallbackResult(result, inputs, imageUrl);
       if (!competition) continue;
+      if (!passesSuggestedRelevanceGate(competition, inputs, userTopics)) continue;
 
       suggestedUrls.add(normalizedUrl);
       suggestedWeb.push({
@@ -1244,6 +1247,8 @@ function fillSuggestedCompetitions(
   pool: Record<string, unknown>[],
   primaryIds: Set<string>,
   limit: number,
+  inputs: FormInputs,
+  userTopics: string[],
   imageAllocator: ImageAllocator,
 ): Record<string, unknown>[] {
   const seen = new Set(picked.map((comp) => getCompetitionId(comp)));
@@ -1254,6 +1259,7 @@ function fillSuggestedCompetitions(
     const id = getCompetitionId(comp);
     if (primaryIds.has(id) || seen.has(id)) continue;
     if (!isSuggestedPoolRecord(comp)) continue;
+    if (!passesSuggestedRelevanceGate(comp, inputs, userTopics)) continue;
     seen.add(id);
     filled.push({
       ...assignCompetitionImage(comp, imageAllocator),
@@ -1671,15 +1677,17 @@ Deno.serve(async (req) => {
     ]);
 
     const suggestedPool = dedupeCompetitionResults([
-      ...leftoverWeb,
-      ...webSuggested.filter((comp) => !primaryIds.has(getCompetitionId(comp))),
-      ...eligibleDb.filter((comp) => !primaryIds.has(getCompetitionId(comp))),
+      ...leftoverWeb.filter((comp) => passesSuggestedRelevanceGate(comp, inputs, userTopics)),
+      ...eligibleDb
+        .filter((comp) => !primaryIds.has(getCompetitionId(comp)))
+        .filter((comp) => passesSuggestedRelevanceGate(comp, inputs, userTopics)),
       ...allCompetitions
         .map((c) => String(c.source ?? "manual") === "web" ? refreshWebRowMetadata(c) : c)
         .map((c) => refreshCompetitionSchedule(c))
         .filter((c) => !primaryIds.has(getCompetitionId(c)))
         .filter((c) => !isCompetitionResultsPage(c) && isCompetitionUpcoming(c))
-        .filter((c) => isSuggestedPoolRecord(c)),
+        .filter((c) => isSuggestedPoolRecord(c))
+        .filter((c) => passesSuggestedRelevanceGate(c, inputs, userTopics)),
     ]);
 
     let suggestedCompetitions = pickSuggestedCompetitions(
@@ -1695,12 +1703,15 @@ Deno.serve(async (req) => {
         suggestedPool,
         primaryIds,
         MAX_SUGGESTED_RESULTS,
+        inputs,
+        userTopics,
         imageAllocator,
       );
     }
 
     suggestedCompetitions = suggestedCompetitions
       .filter((comp) => !primaryIds.has(getCompetitionId(comp)))
+      .filter((comp) => passesSuggestedRelevanceGate(comp, inputs, userTopics))
       .map((comp) => assignCompetitionImage(comp, imageAllocator));
 
     const dbCount = competitions.filter((c) => c._fromDatabase === true).length;

@@ -652,67 +652,77 @@ const RELATED_TOPICS: Record<string, string[]> = {
   Arts: [],
 };
 
-export function passesSuggestedRelevanceGate(
+function isListicleLikeCompetition(competition: Record<string, unknown>): boolean {
+  const combined = `${getCompetitionField(competition, ["name", "title"])} ${getCompetitionField(competition, ["details", "description", "summary"])}`.toLowerCase();
+  return /\b(top|best)\s+\d+\b/.test(combined) ||
+    /\d+\s+(best|top|great)\b/.test(combined) ||
+    /\b(list of|roundup|competitions for)\b/.test(combined) ||
+    /\b\d+\s+[\w\s]{2,}\bcompetitions?\b/.test(combined);
+}
+
+/** 0–1 fit for the suggested section: high = strong match, low = drop. */
+export function scoreSuggestedFit(
   competition: Record<string, unknown>,
   inputs: FormInputs,
   userTopics: string[] = getUserSearchTopics(inputs),
-): boolean {
-  const searchQuery = String(inputs.searchQuery ?? "").trim();
-  if (searchQuery && competitionMatchesOtherText(competition, searchQuery)) {
-    return true;
-  }
-  if (inputs.otherText && competitionMatchesOtherText(competition, inputs.otherText)) {
-    return true;
-  }
+): number {
+  if (topicExplicitlyConflictsWithSearch(competition, userTopics)) return 0;
 
+  const searchRel = scoreSearchRelevance(competition, inputs);
+  const phrase = getEffectiveSearchText(inputs);
   const searchTopics = userTopics.filter((t) => t !== "Other");
-  const searchRelevance = scoreSearchRelevance(competition, inputs);
+  const compText = getCompetitionSearchText(competition);
 
-  if (hasActiveSearchQuery(inputs)) {
-    if (searchRelevance >= 0.35) return true;
+  if (searchQueryMatchesCompetition(competition, inputs)) {
+    return Math.max(0.72, searchRel);
+  }
 
-    const phrase = getEffectiveSearchText(inputs);
+  if (isListicleLikeCompetition(competition) && phrase) {
     const tokens = normalizeInterestText(phrase).split(" ").filter((word) => word.length >= 3);
-    const compText = getCompetitionSearchText(competition);
-    const hasTokenHit = tokens.some((token) => textMatchesKeyword(compText, token));
-
-    if (!hasTokenHit && searchRelevance < 0.2) return false;
-
-    const inferredFromSearch = inferTopicsFromOtherText(phrase);
-    if (inferredFromSearch.some((topic) => competitionMatchesTopic(competition, topic, inputs.otherText))) {
-      return true;
+    if (tokens.length) {
+      const hits = tokens.filter((token) => textMatchesKeyword(compText, token)).length;
+      const ratio = hits / tokens.length;
+      if (ratio >= 0.5) return Math.max(0.38, searchRel);
+      if (ratio >= 0.34) return Math.max(0.22, searchRel);
     }
+    if (competitionMatchesOtherText(competition, phrase)) return Math.max(0.35, searchRel);
+  }
 
-    if (searchTopics.length) {
-      const matched = getMatchedTopicsForCompetition(competition, searchTopics, inputs.otherText);
-      if (matched.some((t) => searchTopics.includes(t)) && (hasTokenHit || searchRelevance > 0)) {
-        return true;
-      }
+  if (hasActiveSearchQuery(inputs) && phrase) {
+    const tokens = normalizeInterestText(phrase).split(" ").filter((word) => word.length >= 3);
+    if (tokens.length) {
+      const hits = tokens.filter((token) => textMatchesKeyword(compText, token)).length;
+      const ratio = hits / tokens.length;
+      if (ratio >= 0.5) return Math.max(0.3, searchRel);
+      if (ratio >= 0.34) return Math.max(0.18, searchRel);
+      if (hits === 0) return 0;
     }
+  }
 
-    return hasTokenHit || searchRelevance > 0;
+  const matched = getMatchedTopicsForCompetition(competition, userTopics, inputs.otherText);
+  if (matched.some((t) => searchTopics.includes(t))) {
+    let score = 0.24 + searchRel * 0.45;
+    if (inputs.location && locationMatchesUser(competition, inputs.location, inputs.format)) {
+      score += 0.08;
+    }
+    if (inputs.format && scoreFormat(competition, inputs.format) > 0) score += 0.06;
+    if (inputs.grade && scoreGrade(competition, inputs.grade) > 0) score += 0.06;
+    return Math.min(0.68, score);
   }
 
   if (userTopics.includes("Other") && inputs.otherText) {
-    return competitionMatchesOtherText(competition, inputs.otherText);
+    return competitionMatchesOtherText(competition, inputs.otherText) ? 0.42 : 0;
   }
 
-  if (!searchTopics.length) return searchRelevance > 0;
-
-  const searchText = getCompetitionSearchText(competition);
-  const matched = getMatchedTopicsForCompetition(competition, searchTopics, inputs.otherText);
-
-  if (matched.some((t) => searchTopics.includes(t))) return true;
-
-  if (topicExplicitlyConflictsWithSearch(competition, userTopics)) return false;
-
   for (const userTopic of searchTopics) {
-    if (topicConflictsWithNegativeSignals(userTopic, searchText)) continue;
+    if (topicConflictsWithNegativeSignals(userTopic, compText)) continue;
 
     for (const related of RELATED_TOPICS[userTopic] ?? []) {
       if (!competitionMatchesTopic(competition, related, inputs.otherText)) continue;
       const keywords = (INTEREST_TOPICS[userTopic] ?? []).filter((kw) => kw.length >= 5);
-      if (keywords.some((kw) => textMatchesKeyword(searchText, kw))) return true;
+      if (keywords.some((kw) => textMatchesKeyword(compText, kw))) {
+        return 0.16 + searchRel * 0.25;
+      }
     }
   }
 
@@ -722,10 +732,28 @@ export function passesSuggestedRelevanceGate(
     (inputs.grade && scoreGrade(competition, inputs.grade) > 0);
 
   if (hasProfileSignal && searchTopics.some((t) => competitionMatchesTopic(competition, t, inputs.otherText))) {
-    return true;
+    return 0.17 + searchRel * 0.2;
   }
 
+  return searchRel;
+}
+
+function searchQueryMatchesCompetition(
+  competition: Record<string, unknown>,
+  inputs: FormInputs,
+): boolean {
+  const searchQuery = String(inputs.searchQuery ?? "").trim();
+  if (searchQuery && competitionMatchesOtherText(competition, searchQuery)) return true;
+  if (inputs.otherText && competitionMatchesOtherText(competition, inputs.otherText)) return true;
   return false;
+}
+
+export function passesSuggestedRelevanceGate(
+  competition: Record<string, unknown>,
+  inputs: FormInputs,
+  userTopics: string[] = getUserSearchTopics(inputs),
+): boolean {
+  return scoreSuggestedFit(competition, inputs, userTopics) >= 0.15;
 }
 
 export function getMatchedTopicsForCompetition(
@@ -1115,14 +1143,6 @@ export function selectTopCompetitions(scored: ScoredCompetition[]): Record<strin
   return top;
 }
 
-function isListicleLikeCompetition(competition: Record<string, unknown>): boolean {
-  const combined = `${getCompetitionField(competition, ["name", "title"])} ${getCompetitionField(competition, ["details", "description", "summary"])}`.toLowerCase();
-  return /\b(top|best)\s+\d+\b/.test(combined) ||
-    /\d+\s+(best|top|great)\b/.test(combined) ||
-    /\b(list of|roundup|competitions for)\b/.test(combined) ||
-    /\b\d+\s+[\w\s]{2,}\bcompetitions?\b/.test(combined);
-}
-
 /** Rank related leftovers for the "may not be what you're looking for" section. */
 export function pickSuggestedCompetitions(
   pool: Record<string, unknown>[],
@@ -1137,12 +1157,13 @@ export function pickSuggestedCompetitions(
   const addCandidate = (competition: Record<string, unknown>, baseScore: number) => {
     const id = getCompetitionId(competition);
     if (excludeIds.has(id)) return;
-    const prequalified = competition._isSuggested === true;
-    if (!prequalified && !passesSuggestedRelevanceGate(competition, inputs, userTopics)) return;
+
+    const fit = scoreSuggestedFit(competition, inputs, userTopics);
+    if (fit < 0.15) return;
 
     const searchBoost = scoreSearchRelevance(competition, inputs) * 0.55;
     const matched = getMatchedTopicsForCompetition(competition, userTopics, inputs.otherText);
-    let score = baseScore + searchBoost;
+    let score = baseScore + searchBoost + fit * 0.35;
     if (matched.some((t) => userTopics.includes(t) && t !== "Other")) score += 0.25;
     if (inputs.location && locationMatchesUser(competition, inputs.location, inputs.format)) {
       score += 0.12;
